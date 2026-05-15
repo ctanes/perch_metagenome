@@ -1,0 +1,5993 @@
+---
+title: |
+  ![](logo_blk.png){width=5in}  
+  PERCH - Paper figures and tests
+author: "Ceylan Tanes"
+date: \today
+output: 
+  pdf_document:
+    toc: true
+    toc_depth: 3
+---
+
+```{r knitr setup, echo=FALSE, message=FALSE}
+library(knitr)
+opts_chunk$set(
+  tidy=FALSE,
+  cache=FALSE,
+  echo=FALSE,
+  warning=FALSE,
+  message=FALSE,
+  dpi=100,
+  fig.width=5,
+  fig.height=3,
+  fig.align = "center"
+  )
+```
+
+```{r child = 'Shotgun_preamble.Rmd'}
+```
+
+
+```{r}
+### protein alignments 
+prot_align_dir <- file.path(data_dir, "sbx_gene_family")
+
+# download these files to local computer 
+#ec_fp <- "/mnt/isilon/microbiome/analysis/biodata/kegg-download-20190228/ec.list"
+#ko_ec_fp <- "/mnt/isilon/microbiome/analysis/biodata/kegg-download-20190228/ftp.bioinformatics.jp/kegg/genes/ko/ko_enzyme.list"
+#butyrate_info_fp <- "/mnt/isilon/microbiome/analysis/biodata/butyrate/butyrate_20180612_gene_info_full.tsv"
+ec_fp <- "/Users/tanesc/Documents/DBs/kegg/ec.list"
+ko_ec_fp <- "/Users/tanesc/Documents/DBs/kegg/ko_enzyme.list"
+butyrate_info_fp <- "/Users/tanesc/Documents/DBs/butyrate/butyrate_20180612_gene_info_full.tsv"
+```
+
+```{r}
+read_gene_aln_results <- function(base_dir, s, taxon_info=F) {
+  gene_results <- data_frame(FileName = list.files(
+    base_dir, pattern="*_1.txt")) %>%
+    group_by(FileName) %>%
+    mutate(fileSize = file.info(file.path(base_dir, FileName))$size) %>%
+    ungroup() %>%
+    filter(fileSize > 25) %>% # delete empty files
+    group_by(FileName) %>%
+    do(read.delim(file.path(base_dir, .$FileName), stringsAsFactors = F)) %>%
+    ungroup() %>%
+    mutate(SampleID = sub("_1.txt", "", FileName, perl=T)) %>%
+    select(-FileName) 
+  
+  if (taxon_info) {
+    gene_results %>%
+      right_join(select(s, SampleID), by="SampleID") %>%
+      complete(SampleID, nesting(geneID, taxon), fill = list(count=0)) %>%
+      filter(!is.na(geneID)) 
+  } else {
+    gene_results %>%
+      group_by(SampleID, geneID) %>%
+      summarize(count = sum(count)) %>%
+      ungroup() %>%
+      
+      right_join(select(s, SampleID), by="SampleID") %>%
+      complete(SampleID, geneID, fill = list(count=0)) %>%
+      filter(!is.na(geneID))
+  }
+  
+}
+```
+
+
+
+```{r}
+#read in the KEGG data
+kegg <- read_gene_aln_results(file.path(prot_align_dir, "20190228_kegg_species_prokaryotes"), s, taxon_info=F) %>%
+  group_by(SampleID) %>%
+  mutate(kegg_counts = sum(count)) %>%
+  ungroup() %>%
+  mutate(props = count/kegg_counts)
+```
+
+
+```{r kegg beta diversity}
+kegg_matrix <- usedist::pivot_to_numeric_matrix(kegg, SampleID, geneID, props)
+bc_kegg <- vegdist(kegg_matrix)
+```
+
+```{r}
+ko_info <- read_delim("/Users/tanesc/Documents/DBs/kegg/ko.list", delim = "\t", col_names = F) %>%
+  setNames(c("geneID", "gene_name")) %>%
+  mutate(geneID = sub("ko:", "", geneID))
+```
+
+
+```{r}
+ko2path <- read_delim("/Users/tanesc/Documents/DBs/kegg/pathway_ko.list", col_names = F, delim = "\t") %>%
+  setNames(c("path", "geneID")) %>%
+  filter(grepl("map", path)) %>%
+  mutate(geneID = sub("ko:", "", geneID)) %>%
+  mutate(path = sub("path:", "", path))
+
+path_list <- read_delim("/Users/tanesc/Documents/DBs/kegg/prokaryotic_pathway.list", col_names = F, delim = "\t") %>%
+  setNames(c("path", "path_name")) %>%
+  mutate(path = paste0("map", path))
+
+
+path_abundances <- kegg %>%
+  left_join(ko2path, by="geneID") %>%
+  group_by(SampleID, path) %>%
+  summarize(props = sum(props)) %>%
+  right_join(path_list, by="path") ## it's a right join because we only want to keep the prok pathways
+
+## calculate the number of genes in each pathway for enrichment analysis
+num_gene_universe <- length(unique(kegg$geneID))
+
+num_genes_in_pathway <- ko2path %>%
+  filter(geneID %in% unique(kegg$geneID)) %>%
+  group_by(path) %>%
+  summarize(num_genes_in_path = n()) %>%
+  ungroup()
+```
+
+
+```{r}
+vfdb_annot <- read_delim("/Users/tanesc/Documents/DBs/VFDB/20250519_vfdb/20250519_VFDB_setB_pro.txt") 
+
+h_flu_vfdb <- vfdb_annot %>%
+  filter(grepl("Haemophilus influenzae", taxon)) %>%
+  pull(geneID) %>%
+  unique() %>%
+  as.character()
+
+
+vfdb_annot <- vfdb_annot %>%
+  distinct(geneID, group)
+  
+
+#read in the VFDB data
+vfdb <- read_gene_aln_results(file.path(prot_align_dir, "20250519_VFDB_setB_pro"), s, taxon_info=F) %>%
+  group_by(SampleID) %>%
+  mutate(total_counts = sum(count)) %>%
+  ungroup() %>%
+  filter(total_counts > 0) %>%
+  left_join(select(s, SampleID, nonhost), by="SampleID") %>%
+  #mutate(props = count/total_counts)
+  mutate(props = count/nonhost)
+
+vfdb_groups <- vfdb %>%
+  left_join(vfdb_annot, by="geneID")
+```
+
+
+# Main analysis: NPOP only
+
+```{r}
+## Subset the metadata file to only keep the samples you would like to test on
+s_npop <- s %>%
+  filter(Keep) %>%
+  filter(!isControl) %>%
+  filter(sample_type %in% "NPOP VTM") %>%
+  droplevels() %>%
+  
+  mutate(study_group = factor(study_group)) %>%
+  mutate(study_group = fct_relevel(study_group, "Control without RTI", after=0)) %>%
+  
+  mutate(age_group = factor(age_group, levels=c("0-5 months", "6-11 months", "12-23 months", "24-59 months"))) %>%
+  mutate(age_group_linear = factor(age_group, ordered=T)) %>%
+  
+  mutate(study_group_collapse = fct_recode(study_group_collapse, Control="Community control", Pneumonia="Case")) %>%
+  mutate(study_group_collapse = factor(study_group_collapse, levels=c("Control", "Pneumonia"))) %>%
+  
+  mutate(study_group_collapse_control = fct_collapse(study_group, Control=c("Control without RTI", "Control with RTI"))) %>%
+  
+  mutate(study_group_death = ifelse(death %in% "Yes", "Death", as.character(study_group_collapse_control))) %>%
+  mutate(study_group_death = factor(study_group_death, levels=c(levels(.$study_group_collapse_control), "Death"))) %>%
+  
+  left_join(etiology_clean, by="subject_id") %>%
+  mutate(pathogen_clean = ifelse(is.na(etiology_75), as.character(study_group), etiology_75)) %>%
+  mutate(pathogen_clean = fct_other(pathogen_clean, keep=c("Control without RTI", "Control with RTI", "RSV", "HMPV_A_B", "PARA_3"))) %>%
+  
+  left_join(etiology_entropy, by="subject_id") %>%
+  
+  mutate(is_RSV = ifelse(pathogen_clean %in% "RSV", "RSV", "not RSV")) %>%
+  mutate(isDeath = study_group_death %in% "Death") %>%
+  
+  mutate(malnutrition_baseline = factor(malnutrition_baseline, levels=c("Normal or overweight", "Moderate malnutrition", "Severe malnutrition"))) %>%
+  mutate(malnutrition_baseline_all = malnutrition_baseline) %>%
+  mutate(malnutrition_baseline = fct_collapse(malnutrition_baseline, Malnutrition = c("Moderate malnutrition", "Severe malnutrition"))) 
+
+## Set colors for each factor ahead of time so they are consistent through the report.
+ann_colors = list(
+  #study_group = factor_palette(s_toTest$study_group, as.character(NatParksPalettes::natparks.pals("Acadia", 9))[c(3,1,7,9)]),
+  age_group = factor_palette(s_npop$age_group, viridis(length(unique(s_npop$age_group)), end=0.8) ),
+  #study_group_collapse = factor_palette(s_npop$study_group_collapse, c("#779FA1", "#CF5C36")),
+  study_group_collapse_control = factor_palette(s_npop$study_group_collapse_control, c("#CC6677", "#88CCEE", "#0077BB")),
+  study_group_death = factor_palette(s_npop$study_group_death, c("#CC6677", "#88CCEE", "#0077BB", "#BEC100"))
+)
+#c("#429EA6", "#DB995A", "#7F3044", "#939673")
+
+## Change this to be the breakdown of whatever variable the collaborator is interested in
+addmargins(table(s_npop$study_group_death, s_npop$study_group, useNA = "ifany")) %>%
+  pander(split.table=Inf)
+
+addmargins(table(s_npop$study_group_death, s_npop$current_abx, useNA = "ifany")) %>%
+  pander(split.table=Inf)
+
+
+#addmargins(table(s_npop$study_group_death, s_npop$abx_new, useNA = "ifany")) %>%
+#  pander(split.table=Inf)
+
+addmargins(table(s_npop$study_group_death, s_npop$malnutrition_baseline, useNA = "ifany")) %>%
+  pander(split.table=Inf)
+```
+
+
+```{r}
+props_toTest_npop <- summed_props %>%
+  as.data.frame() %>% 
+  rownames_to_column("Taxa") %>% 
+  pivot_longer(-Taxa, names_to="SampleID", values_to="props") %>%
+  right_join(s_npop, by="SampleID")  %>%
+  group_by(Taxa, study_group) %>%
+  mutate(perc_present = mean(props > 0)) %>%
+  mutate(mean_prop = mean(props)) %>%
+  ungroup() %>%
+  
+  group_by(Taxa) %>%
+  mutate(max_mean_prop = max(mean_prop)) %>%
+  ungroup() %>%
+  
+  filter(max_mean_prop > 0.01) %>%
+  # We only want the species level assignments
+  filter(!Taxa %in% c("Bacteria", "Bacillota Streptococcus", "Bacillota Staphylococcus", "Pseudomonadota Haemophilus")) %>% 
+  filter(!Taxa %in% c("Bacteria")) %>% 
+  
+  mutate(props_original = props) %>%
+  mutate(props = props + min(filter(., props>0)$props) / 10) %>%
+  mutate(props_log = log10(props))
+```
+
+
+
+```{r}
+genes_npop <- kegg %>%
+  right_join(s_npop, by="SampleID") %>%
+  
+  group_by(geneID) %>%
+  mutate(perc_present = mean(props > 0)) %>%
+  mutate(mean_prop = mean(props)) %>%
+  #summarize(perc_present = mean(props > 0), mean_prop = mean(props)) %>%
+  ungroup() %>%
+  filter(perc_present > 0.9) %>%
+  filter(mean_prop > 1e-4) %>%
+  droplevels() %>%
+  
+  mutate(props_original = props) %>%
+  mutate(props = props + min(filter(., props>0)$props) / 10) %>%
+  mutate(props_log = log10(props)) %>%
+  
+  left_join(ko_info, by="geneID")
+```
+
+
+# Figure 1: Development of microbiome in healthy subjects
+
+
+```{r}
+s_toTest <- s_npop %>%
+  filter(study_group_collapse == "Control") %>%
+  droplevels()
+```
+
+
+```{r}
+table(s_toTest$study_group, s_toTest$current_abx)
+```
+
+
+
+## Fig1A Alpha diversity
+
+```{r fig.width=8}
+s_toTest %>%
+  pivot_longer(c("Richness", "Shannon"), names_to="metric", values_to="alpha") %>%
+  mutate(age_groups= fct_relabel(age_group, function(x) gsub(" ", "\n", x))) %>%
+  
+  ggplot(aes(x=age_groups, y=alpha, color=age_group)) +
+    geom_boxplot(outlier.alpha=0) +
+    geom_quasirandom(aes(shape=study_group)) +
+    facet_wrap(~metric, scales = "free") +
+    scale_color_manual(values=ann_colors$age_group) +
+    scale_shape_manual(values=c(17,2)) +
+    theme_clean() +
+    theme(
+      aspect.ratio = 0.75,
+      legend.position = "bottom"
+    ) +
+    guides(color="none") +
+    labs(
+      x="", color="", shape="",
+      y="Alpha diversity value"
+    )
+ggsave("perch_Fig1A_alpha.pdf", height=3, width=6, useDingbats=F)
+```
+
+
+Richness ~ study_group + age_group_linear
+
+```{r}
+summaries_df <- s_toTest %>%
+  
+  # for regular linear models
+  do(tidy(lm(Richness ~ study_group + age_group_linear, data=.))) %>%
+  #do(tidy_lm_posthoc(lm(alpha ~ study_group, data=.), "study_group")) %>%
+  
+  # for linear mixed effects models
+  #do(tidy(nlme::lme(alpha ~ study_group, random=~1|subject_id, data=., na.action=na.omit), effect="fixed")) %>%
+  #do(tidy_lm_posthoc(nlme::lme(alpha ~ study_group, random=~1|subject_id, data=., na.action=na.omit), "study_group")) %>%
+  
+  ungroup() %>%
+  
+  filter(!grepl("Intercept|Residuals", term)) %>%
+  #mutate(term = sub("age_group", "0-5 months - ", term)) %>%
+  mutate(term = sub("study_group", "Control - ", term))
+
+summaries_df %>%
+  kable_style()
+```
+
+
+
+
+Shannon ~ study_group + age_group_linear
+
+```{r}
+summaries_df <- s_toTest %>%
+  
+  # for regular linear models
+  do(tidy(lm(Shannon ~ study_group + age_group_linear, data=.))) %>%
+  #do(tidy_lm_posthoc(lm(alpha ~ study_group, data=.), "study_group")) %>%
+  
+  # for linear mixed effects models
+  #do(tidy(nlme::lme(alpha ~ study_group, random=~1|subject_id, data=., na.action=na.omit), effect="fixed")) %>%
+  #do(tidy_lm_posthoc(nlme::lme(alpha ~ study_group, random=~1|subject_id, data=., na.action=na.omit), "study_group")) %>%
+  
+  ungroup() %>%
+  
+  filter(!grepl("Intercept|Residuals", term)) %>%
+  #mutate(term = sub("age_group", "0-5 months - ", term)) %>%
+  mutate(term = sub("study_group", "Control - ", term))
+
+summaries_df %>%
+  kable_style()
+```
+
+
+
+Shannon ~ bf_current + study_group + age_group_linear
+
+```{r}
+summaries_df <- s_toTest %>%
+  
+  # for regular linear models
+  do(tidy(lm(Shannon ~ bf_current + study_group + age_group_linear, data=.))) %>%
+  #do(tidy_lm_posthoc(lm(alpha ~ study_group, data=.), "study_group")) %>%
+  
+  # for linear mixed effects models
+  #do(tidy(nlme::lme(alpha ~ study_group, random=~1|subject_id, data=., na.action=na.omit), effect="fixed")) %>%
+  #do(tidy_lm_posthoc(nlme::lme(alpha ~ study_group, random=~1|subject_id, data=., na.action=na.omit), "study_group")) %>%
+  
+  ungroup() %>%
+  
+  filter(!grepl("Intercept|Residuals", term)) %>%
+  #mutate(term = sub("age_group", "0-5 months - ", term)) %>%
+  mutate(term = sub("study_group", "Control - ", term))
+
+summaries_df %>%
+  kable_style()
+```
+
+For each age group: Shannon ~ bf_current + study_group
+
+```{r}
+summaries_df <- s_toTest %>%
+  
+  group_by(age_group) %>%
+  # for regular linear models
+  do(tidy(lm(Shannon ~ bf_current + study_group, data=.))) %>%
+  #do(tidy_lm_posthoc(lm(alpha ~ study_group, data=.), "study_group")) %>%
+  
+  # for linear mixed effects models
+  #do(tidy(nlme::lme(alpha ~ study_group, random=~1|subject_id, data=., na.action=na.omit), effect="fixed")) %>%
+  #do(tidy_lm_posthoc(nlme::lme(alpha ~ study_group, random=~1|subject_id, data=., na.action=na.omit), "study_group")) %>%
+  
+  ungroup() %>%
+  
+  filter(!grepl("Intercept|Residuals", term)) %>%
+  #mutate(term = sub("age_group", "0-5 months - ", term)) %>%
+  mutate(term = sub("study_group", "Control - ", term))
+
+summaries_df %>%
+  kable_style()
+```
+
+
+
+Shannon ~ study_group + age_group
+
+
+```{r}
+summaries_df <- s_toTest %>%
+  
+  # for regular linear models
+  #do(tidy(lm(alpha ~ age_group, data=.))) %>%
+  do(tidy_lm_posthoc(lm(Shannon ~ study_group + age_group, data=.), "age_group")) %>%
+  
+  # for linear mixed effects models
+  #do(tidy(nlme::lme(alpha ~ study_group, random=~1|subject_id, data=., na.action=na.omit), effect="fixed")) %>%
+  #do(tidy_lm_posthoc(nlme::lme(alpha ~ study_group, random=~1|subject_id, data=., na.action=na.omit), "study_group")) %>%
+  
+  ungroup() %>%
+  
+  filter(!grepl("Intercept|Residuals", term)) %>%
+  #mutate(term = sub("study_group", "Control - ", term)) %>%
+  #mutate(term = sub("age_group", "0-5 months - ", term))
+
+  group_by(term) %>%
+  mutate(fdr = p.adjust(p.value, method="BH")) %>%
+  ungroup()
+
+summaries_df %>%
+  kable_style(fdr, 0.1)
+```
+
+
+## Fig1B Beta diversity Kraken
+
+```{r}
+pc_df <- s_toTest %>%
+  pcoaplus(bc) 
+
+centroids <- pc_df %>%
+  group_by(age_group) %>%
+  summarize(Axis.1=mean(Axis.1), Axis.2=mean(Axis.2)) %>%
+  ungroup()
+  
+pc_df %>%
+  ggplot(aes(x=Axis.1, y=Axis.2, color=age_group, shape=study_group)) +
+    geom_point(alpha=0.5) +
+    #stat_ellipse() +
+    geom_point(data=centroids, shape=21, stroke=1, size=2.5, color="black", aes(fill=age_group)) +
+    scale_color_manual(values=ann_colors$age_group) +
+    scale_fill_manual(values=ann_colors$age_group) +
+    scale_shape_manual(values=c(17,2)) +
+    theme_clean_pcoa() + 
+    labs(
+      x=attr(pc_df, "axislabel")[1],
+      y=attr(pc_df, "axislabel")[2],
+      color="", shape="")
+
+ggsave("perch_Fig1B_pcoa_NPOP_age.pdf", height=2, width=5, useDingbats=F)
+```
+
+
+Only for the control group:  distmat ~ study_group + age_group
+
+```{r eval=T}
+summaries_df <- s_toTest %>%
+  do(adonispost(
+    ., distmat = bc, formula = distmat ~ study_group + age_group,
+    sample_id_var = SampleID, permutations=999, which = age_group, alpha = 1)) %>%
+  filter(!term %in% c("Residual", "Total")) %>%
+  select(-one_of(c("sumsq")))
+
+summaries_df %>%
+  kable_style()
+```
+
+
+
+
+Only for the control group:  distmat ~ bf_current + study_group + age_group
+
+```{r eval=T}
+summaries_df <- s_toTest %>%
+  filter(!is.na(bf_current)) %>%
+  do(adonispost(
+    ., distmat = bc, formula = distmat ~ bf_current + study_group + age_group,
+    sample_id_var = SampleID, permutations=999, which = age_group, alpha = 1)) %>%
+  filter(!term %in% c("Residual", "Total")) %>%
+  select(-one_of(c("sumsq")))
+
+summaries_df %>%
+  kable_style()
+```
+
+
+Only for the control group:  distmat ~ bf_current + study_group + age_group_linear
+
+```{r eval=T}
+summaries_df <- s_toTest %>%
+  filter(!is.na(bf_current)) %>%
+  do(adonisplus(
+    ., distmat = bc, formula = distmat ~ bf_current + study_group + age_group_linear,
+    sample_id_var = SampleID, permutations=999)) %>%
+  filter(!term %in% c("Residual", "Total")) %>%
+  select(-one_of(c("sumsq")))
+
+summaries_df %>%
+  kable_style()
+```
+
+
+## Fig1C Beta diversity KEGG
+
+```{r}
+pc_df <- s_toTest %>%
+  pcoaplus(bc_kegg) 
+
+centroids <- pc_df %>%
+  group_by(age_group) %>%
+  summarize(Axis.1=mean(Axis.1), Axis.2=mean(Axis.2)) %>%
+  ungroup()
+
+bind_rows(pc_df %>% 
+  select(SampleID, Axis.1, Axis.2, age_group, study_group) %>% mutate(shape2 = "Data"),
+  centroids %>% mutate(shape2 = "Centroids")
+) %>%
+  write.table(file="test_PCoA_data.txt", row.names=F, quote=F, sep='\t')
+
+pc_df %>%
+  ggplot(aes(x=Axis.1, y=Axis.2, color=age_group, shape=study_group)) +
+    geom_point(alpha=0.5) +
+    #stat_ellipse() +
+    geom_point(data=centroids, shape=21, stroke=1, size=2.5, color="black", aes(fill=age_group)) +
+    scale_color_manual(values=ann_colors$age_group) +
+    scale_fill_manual(values=ann_colors$age_group) +
+    scale_shape_manual(values=c(17,2)) +
+    theme_clean_pcoa() + 
+    labs(
+      x=attr(pc_df, "axislabel")[1],
+      y=attr(pc_df, "axislabel")[2],
+      color="", shape="")
+
+ggsave("perch_Fig1C_pcoa_NPOP_age_kegg.pdf", height=2, width=5, useDingbats=F)
+```
+
+
+Only for the control group:  distmat ~ study_group + age_group
+
+```{r eval=T}
+summaries_df <- s_toTest %>%
+  #group_by(sample_type) %>%
+  do(adonispost(
+    ., distmat = bc_kegg, formula = distmat ~ study_group + age_group,
+    sample_id_var = SampleID, permutations=999, which = age_group, alpha = 1)) %>%
+  #ungroup() %>%
+  
+  filter(!term %in% c("Residual", "Total")) %>%
+  select(-one_of(c("sumsq"))) 
+
+summaries_df %>%
+  kable_style()
+```
+
+
+Only for the control group:  distmat ~ bf_current + study_group + age_group
+
+```{r eval=T}
+summaries_df <- s_toTest %>%
+  filter(!is.na(bf_current)) %>%
+  do(adonispost(
+    ., distmat = bc_kegg, formula = distmat ~ bf_current + study_group + age_group,
+    sample_id_var = SampleID, permutations=999, which = age_group, alpha = 1)) %>%
+  filter(!term %in% c("Residual", "Total")) %>%
+  select(-one_of(c("sumsq")))
+
+summaries_df %>%
+  kable_style()
+```
+
+
+Only for the control group:  distmat ~ bf_current + study_group + age_group_linear
+
+```{r eval=T}
+summaries_df <- s_toTest %>%
+  filter(!is.na(bf_current)) %>%
+  do(adonisplus(
+    ., distmat = bc_kegg, formula = distmat ~ bf_current + study_group + age_group_linear,
+    sample_id_var = SampleID, permutations=999)) %>%
+  filter(!term %in% c("Residual", "Total")) %>%
+  select(-one_of(c("sumsq")))
+
+summaries_df %>%
+  kable_style()
+```
+
+
+
+## Fig1D Differential abundance
+
+```{r}
+props_toTest <- props_toTest_npop %>%
+  filter(study_group %in% c("Control without RTI", "Control with RTI")) %>%
+  droplevels() 
+```
+
+
+props_log ~ study_group + age_group_linear
+
+```{r}
+summaries_df <- props_toTest %>%
+  
+  group_by(Taxa) %>%
+  
+  # for regular linear models
+  do(tidy(lm(props_log ~ study_group + age_group_linear, data=.))) %>%
+  #do(tidy_lm_posthoc(lm(props_log ~ study_group, data=.), "study_group")) %>%
+  
+  # for linear mixed effects models
+  #do(tidy(nlme::lme(props_log ~ study_group, random=~1|subject_id, data=., na.action=na.omit), effect="fixed")) %>%
+  #do(tidy_lm_posthoc(nlme::lme(props_log ~ study_group, random=~1|subject_id, data=., na.action=na.omit), "study_group")) %>%
+
+  ungroup() %>%
+  
+  filter(!grepl("Intercept|Residuals", term)) %>%
+  mutate(term = sub("study_group", "Control - ", term)) %>%
+  #mutate(term = sub("age_group", "0-5 months - ", term)) %>%
+  
+  group_by(term) %>%
+  mutate(fdr = p.adjust(p.value, method="BH")) %>%
+  ungroup()
+
+#summaries_df %>%
+#  filter(p.value < 0.05) %>%
+#  kable_style(fdr, 0.1) %>%
+#  column_spec(c(1:2), width = "15em")
+```
+
+
+
+
+```{r fig.width=6, fig.height=4}
+
+summaries_df %>%
+  ## we don't care about the quadratic or cubic terms (None are q<0.1 anyways)
+  filter(term == "age_group_linear.L") %>%
+  filter(fdr<0.1) %>%
+  
+  mutate(Taxa = reorder(Taxa, estimate)) %>%
+  mutate(isSig = ifelse(fdr < 0.1, "q<0.1", "q>0.1")) %>%
+  
+  mutate(Taxa = fct_relabel(Taxa, function(x) sub("Pseudomonadota |Bacteroidota |Bacillota |Actinomycetota", "", x))) %>%
+  
+  ggplot(aes(x=estimate, y=Taxa)) +
+    geom_vline(xintercept=0, linetype=2) +
+    geom_pointrange(aes(xmin=estimate-std.error, xmax=estimate+std.error)) +
+    theme_clean() +
+    theme(
+      strip.text.y = element_text(angle = 0)
+    ) +
+    labs(
+      x="Log increase with age",
+      y="", color="", shape=""
+    )
+```
+
+
+```{r fig.width=6, fig.height=4}
+
+summaries_df %>%
+  ## we don't care about the quadratic or cubic terms (None are q<0.1 anyways)
+  #filter(term == "age_group_linear.L") %>%
+  filter(fdr<0.1) %>%
+  arrange(Taxa, term) %>%
+  mutate(Taxa = fct_reorder(Taxa, estimate, .fun = `[`, 1)) %>%
+  
+  #mutate(Taxa = reorder(Taxa, estimate)) %>%
+  mutate(isSig = ifelse(fdr < 0.1, "q<0.1", "q>0.1")) %>%
+  
+  mutate(Taxa = fct_relabel(Taxa, function(x) sub("Pseudomonadota |Bacteroidota |Bacillota |Actinomycetota", "", x))) %>%
+  
+  mutate(term = factor(term)) %>%
+  mutate(term = fct_recode(term, `Linear term`="age_group_linear.L", `Quadratic term`="age_group_linear.Q")) %>%
+  
+  ggplot(aes(x=estimate, y=Taxa, color=term)) +
+    geom_vline(xintercept=0, linetype=2) +
+    geom_pointrange(aes(xmin=estimate-std.error, xmax=estimate+std.error),  position = position_dodge(width = 0.5)) +
+    scale_color_manual(values=c("gray10", "gray70")) +
+    theme_clean() +
+    theme(
+      strip.text.y = element_text(angle = 0),
+      legend.position = "bottom"
+    ) +
+    labs(
+      x="Log increase with age",
+      y="", color="", shape=""
+    )
+ggsave("perch_Fig1D_diffAb_withQuadratic.pdf", height=4.8, width=5, useDingbats=F)
+```
+
+
+
+## Fig1E Select taxa associated with age
+
+Focus on a few bacteria across the age groups
+
+```{r fig.height=8}
+props_toTest %>%
+  
+  #filter(Taxa %in% c("Actinomycetota Bifidobacterium longum", "Bacillota Streptococcus lactarius", "Pseudomonadota Moraxella nonliquefaciens", "Bacteroidota Prevotella melaninogenica","Pseudomonadota Neisseria meningitidis" )) %>%
+  filter(Taxa %in% c("Actinomycetota Bifidobacterium longum", "Bacillota Streptococcus lactarius", "Pseudomonadota Moraxella nonliquefaciens", "Bacteroidota Prevotella histicola")) %>%
+  mutate(Taxa = fct_relabel(Taxa, function(x) sub("Pseudomonadota |Bacteroidota |Bacillota |Actinomycetota", "", x))) %>%
+  
+  #mutate(Taxa = fct_relabel(Taxa, function(x) gsub(" ", "\n", x))) %>%
+  mutate(age_groups = fct_relabel(age_group, function(x) gsub(" ", "\n", x))) %>%
+  ggplot(aes(x=age_groups, y=props, color=age_group)) +
+    geom_boxplot(outlier.alpha=0) +
+    geom_quasirandom(aes(shape=study_group)) +
+    facet_wrap(~Taxa, ncol = 2, scales="free") +
+    scale_color_manual(values=ann_colors$age_group) +
+    scale_shape_manual(values=c(17,2)) +
+    scale_y_continuous(labels=scales:::percent, trans="log10") +
+    theme_clean() +
+    theme(
+      #axis.text.x=element_text(angle=90, hjust=1, vjust=0.5),
+      legend.position = "bottom",
+      aspect.ratio = 0.75
+    ) +
+    guides(color="none") +
+    labs(
+      x="", color="", shape="",
+      y="Relative abundance"
+    )
+ggsave("perch_Fig1E_select_taxa.pdf", height=5.2, width=7, useDingbats=F)
+```
+
+
+props_log ~ bf_current + study_group + age_group_linear
+
+```{r}
+summaries_df <- props_toTest %>%
+  
+  group_by(Taxa) %>%
+  
+  # for regular linear models
+  do(tidy(lm(props_log ~ bf_current + study_group + age_group_linear, data=.))) %>%
+  #do(tidy_lm_posthoc(lm(props_log ~ study_group, data=.), "study_group")) %>%
+  
+  # for linear mixed effects models
+  #do(tidy(nlme::lme(props_log ~ study_group, random=~1|subject_id, data=., na.action=na.omit), effect="fixed")) %>%
+  #do(tidy_lm_posthoc(nlme::lme(props_log ~ study_group, random=~1|subject_id, data=., na.action=na.omit), "study_group")) %>%
+
+  ungroup() %>%
+  
+  filter(!grepl("Intercept|Residuals", term)) %>%
+  mutate(term = sub("study_group", "Control - ", term)) %>%
+  mutate(term = sub("bf_current", "no BF - ", term)) %>%
+  
+  group_by(term) %>%
+  mutate(fdr = p.adjust(p.value, method="BH")) %>%
+  ungroup()
+
+#summaries_df %>%
+#  filter(p.value < 0.05) %>%
+#  kable_style(fdr, 0.1) %>%
+#  column_spec(c(1:2), width = "15em")
+```
+
+
+
+```{r fig.width=6, fig.height=4}
+
+summaries_df %>%
+  ## we don't care about the quadratic or cubic terms (None are q<0.1 anyways)
+  #filter(term == "age_group_linear.L") %>%
+  filter(fdr<0.1) %>%
+  arrange(Taxa, term) %>%
+  mutate(Taxa = fct_reorder(Taxa, estimate, .fun = `[`, 1)) %>%
+  
+  #mutate(Taxa = reorder(Taxa, estimate)) %>%
+  mutate(isSig = ifelse(fdr < 0.1, "q<0.1", "q>0.1")) %>%
+  
+  mutate(Taxa = fct_relabel(Taxa, function(x) sub("Pseudomonadota |Bacteroidota |Bacillota |Actinomycetota", "", x))) %>%
+  
+  mutate(term = factor(term)) %>%
+  mutate(term = fct_recode(term, `Linear term`="age_group_linear.L", `Quadratic term`="age_group_linear.Q")) %>%
+  
+  ggplot(aes(x=estimate, y=Taxa, color=term)) +
+    geom_vline(xintercept=0, linetype=2) +
+    geom_pointrange(aes(xmin=estimate-std.error, xmax=estimate+std.error),  position = position_dodge(width = 0.5)) +
+    scale_color_manual(values=c("gray10", "gray70", "red")) +
+    theme_clean() +
+    theme(
+      strip.text.y = element_text(angle = 0),
+      legend.position = "bottom"
+    ) +
+    labs(
+      x="Log increase with age",
+      y="", color="", shape=""
+    )
+#ggsave("perch_Fig1D_diffAb_bf.pdf", height=4.8, width=6, useDingbats=F)
+```
+
+
+## Supp Fig2A
+
+```{r}
+pc_df <- s_toTest %>%
+  filter(!is.na(bf_current)) %>%
+  pcoaplus(bc) 
+
+centroids <- pc_df %>%
+  group_by(age_group, bf_current) %>%
+  summarize(Axis.1=mean(Axis.1), Axis.2=mean(Axis.2)) %>%
+  ungroup()
+  
+pc_df %>%
+  ggplot(aes(x=Axis.1, y=Axis.2, color=age_group, shape=bf_current)) +
+    geom_point(alpha=1) +
+    #stat_ellipse() +
+    #geom_point(data=centroids, shape=8, stroke=1.5, size=3) +
+    scale_color_manual(values=ann_colors$age_group) +
+    scale_shape_manual(values=c(15,0)) +
+    facet_wrap(~age_group, ncol=4) +
+    theme_clean_pcoa() + 
+    theme(
+      legend.position="bottom"
+    ) +
+    guides(color="none") +
+    labs(
+      x=attr(pc_df, "axislabel")[1],
+      y=attr(pc_df, "axislabel")[2],
+      color="", shape="")
+
+ggsave("perch_SuppFig2A_pcoa_NPOP_bf.pdf", height=3, width=7.8, useDingbats=F)
+```
+
+
+Only for the control group:  distmat ~ study_group + age_group
+
+```{r eval=T}
+summaries_df <- s_toTest %>%
+  filter(age_group %in% c("12-23 months")) %>%
+  do(adonisplus(
+    ., distmat = bc, formula = distmat ~ study_group + bf_current,
+    sample_id_var = SampleID, permutations=999)) %>%
+  filter(!term %in% c("Residual", "Total")) %>%
+  select(-one_of(c("sumsq")))
+
+summaries_df %>%
+  kable_style()
+```
+
+
+
+## Supp Fig2B
+
+props_log ~ study_group + bf_current
+
+```{r}
+summaries_df <- props_toTest %>%
+  
+  filter(age_group %in% c("12-23 months")) %>%
+  
+  group_by(Taxa) %>%
+  
+  # for regular linear models
+  do(tidy(lm(props_log ~ study_group + bf_current, data=.))) %>%
+  #do(tidy_lm_posthoc(lm(props_log ~ study_group, data=.), "study_group")) %>%
+  
+  # for linear mixed effects models
+  #do(tidy(nlme::lme(props_log ~ study_group, random=~1|subject_id, data=., na.action=na.omit), effect="fixed")) %>%
+  #do(tidy_lm_posthoc(nlme::lme(props_log ~ study_group, random=~1|subject_id, data=., na.action=na.omit), "study_group")) %>%
+
+  ungroup() %>%
+  
+  filter(!grepl("Intercept|Residuals", term)) %>%
+  mutate(term = sub("study_group", "Control - ", term)) %>%
+  mutate(term = sub("bf_current", "no BF - ", term)) %>%
+  
+  group_by(term) %>%
+  mutate(fdr = p.adjust(p.value, method="BH")) %>%
+  ungroup()
+
+#summaries_df %>%
+#  filter(p.value < 0.05) %>%
+#  kable_style(fdr, 0.1) %>%
+#  column_spec(c(1:2), width = "15em")
+```
+
+
+
+```{r fig.height=8}
+props_toTest %>%
+  filter(!is.na(bf_current)) %>%
+  filter(Taxa %in% (summaries_df %>% filter(fdr<0.1) %>% pull(Taxa) %>% unique())) %>%
+  mutate(Taxa = fct_relabel(Taxa, function(x) sub("Pseudomonadota |Bacteroidota |Bacillota |Actinomycetota", "", x))) %>%
+  
+  #mutate(Taxa = fct_relabel(Taxa, function(x) gsub(" ", "\n", x))) %>%
+  mutate(age_groups = fct_relabel(age_group, function(x) gsub(" ", "\n", x))) %>%
+  ggplot(aes(x=age_groups, y=props, color=age_group, shape=bf_current)) +
+    geom_boxplot(outlier.alpha=0) +
+    geom_quasirandom(dodge.width=0.75) +
+    facet_wrap(~Taxa, ncol = 2, scales="free") +
+    scale_color_manual(values=ann_colors$age_group) +
+    scale_shape_manual(values=c(15,0)) +
+    scale_y_continuous(labels=scales:::percent, trans="log10") +
+    theme_clean() +
+    theme(
+      #axis.text.x=element_text(angle=90, hjust=1, vjust=0.5),
+      legend.position = "bottom",
+      aspect.ratio = 0.75
+    ) +
+    guides(color="none") +
+    labs(
+      x="", color="", shape="",
+      y="Relative abundance"
+    )
+ggsave("perch_SuppFig2B_diffAb_bf.pdf", height=6, width=7, useDingbats=F)
+```
+
+
+
+
+## Fig1F Pathways
+
+```{r}
+genes_toTest <- genes_npop %>%
+  filter(study_group %in% c("Control without RTI", "Control with RTI")) %>%
+  droplevels() 
+```
+
+
+
+props_log ~ study_group + age_group_linear
+
+```{r}
+summaries_df <- genes_toTest %>%
+  
+  group_by(geneID, gene_name) %>%
+  do(tidy(lm(props_log ~ study_group + age_group_linear, data=.))) %>%
+  ungroup() %>%
+  
+  filter(!grepl("Intercept", term)) %>%
+  #mutate(term = sub("study_group", "Control - ", term)) %>% ### Or whatever the reference level is
+  
+  group_by(term) %>%
+  mutate(fdr = p.adjust(p.value, method="BH")) %>%
+  ungroup()
+```
+
+
+
+```{r fig.height=6, fig.width=8}
+## find the pathways the fdr<0.1 genes are in
+sig_genes <- summaries_df %>%
+  #(grepl("age_group", term)) %>%
+  filter(term %in% "age_group_linear.L") %>%
+  filter(fdr < 0.1)  %>%
+  droplevels()
+  
+temp <- sig_genes %>%
+  left_join(ko2path, by="geneID") %>%
+  filter(path %in% path_list$path) %>%
+  filter(!is.na(path))
+  
+```
+
+```{r fig.height=8, fig.width=8}
+enrichment_tests <- temp %>%
+  mutate(gene_name = paste(geneID, gene_name)) %>%
+  group_by(path) %>%
+  summarize(num_sig_genes = n(), 
+            genes = paste(gene_name, collapse = ", "), 
+            num_pos = sum(estimate>0), 
+            num_neg = sum(estimate<0)) %>%
+  ungroup() %>%
+  left_join(num_genes_in_pathway, by="path") %>%
+  filter(num_genes_in_path > 1) %>%
+  filter(num_sig_genes > 1) %>%
+  mutate(p.value = 1 - phyper(num_sig_genes, num_genes_in_path, num_gene_universe-num_genes_in_path, nrow(sig_genes))) %>%
+  mutate(fdr = p.adjust(p.value, method="BH")) %>%
+  left_join(path_list, by="path") %>%
+  mutate(perc_sig = num_sig_genes/num_genes_in_path) %>%
+  mutate(path_text = paste0(num_pos, "+;", num_neg, "-"))
+
+
+enrichment_tests %>%
+  filter(fdr<0.05) %>%
+  mutate(path_name = reorder(path_name, perc_sig)) %>%
+  ggplot(aes(x = perc_sig, y=path_name, fill=num_sig_genes)) +
+    geom_bar(stat="identity") +
+    geom_text(aes(label=path_text), nudge_x = 0.07, size=3) +
+    scale_fill_viridis(trans="log10", option="magma", end=0.8) +
+    scale_x_continuous(labels=scales:::percent, breaks=c(0,0.25,0.5,0.75,1)) +
+    theme_clean() +
+    labs(
+      x= "Percent of genes in pathway\ncorrelated with age groups",
+      y="", fill="Number of\ngenes\nFDR<0.1"
+    )
+ggsave("perch_Fig1F_pathway_enrichments.pdf", height=6, width=8, useDingbats=F)
+```
+
+
+## Fig1G LPS and galactose metabolism
+
+```{r}
+temp %>% 
+  filter(path %in% "map00540") %>%
+  
+  separate(gene_name, into=c("gene_name", "desc"), sep=';') %>%
+  
+  mutate(gene_name = reorder(gene_name, estimate)) %>%
+  mutate(isSig = ifelse(fdr < 0.1, "q<0.1", "q>0.1")) %>%
+  
+  #mutate(Taxa = fct_relabel(Taxa, function(x) sub("Pseudomonadota |Bacteroidota |Bacillota |Actinomycetota", "", x))) %>%
+  
+  #mutate(term = sub("Control without RTI - ", "", term))
+  
+  ggplot(aes(x=estimate, y=gene_name, shape=isSig)) +
+    geom_vline(xintercept=0, linetype=2) +
+    geom_pointrange(aes(xmin=estimate-std.error, xmax=estimate+std.error), position = position_dodge(width = 0.5)) +
+    scale_shape_manual(values=c(16,1)) +
+    scale_color_brewer(palette="Set1") +
+    #scale_color_manual(values=ann_colors$age_group) +
+    theme_clean() +
+    theme(
+      strip.text.y = element_text(angle = 0)
+    ) +
+    labs(
+      x="Log difference between groups",
+      y="", color="", shape=""
+    )
+ggsave("perch_Fig1Ga_lps.pdf", height=3, width=5, useDingbats=F)
+```
+
+```{r eval=F}
+temp %>% 
+  filter(path %in% "map00650") %>%
+  
+  separate(gene_name, into=c("gene_name", "desc"), sep=';') %>%
+  
+  mutate(gene_name = reorder(gene_name, estimate)) %>%
+  mutate(isSig = ifelse(fdr < 0.1, "q<0.1", "q>0.1")) %>%
+  
+  #mutate(Taxa = fct_relabel(Taxa, function(x) sub("Pseudomonadota |Bacteroidota |Bacillota |Actinomycetota", "", x))) %>%
+  
+  #mutate(term = sub("Control without RTI - ", "", term))
+  
+  ggplot(aes(x=estimate, y=gene_name, shape=isSig)) +
+    geom_vline(xintercept=0, linetype=2) +
+    geom_pointrange(aes(xmin=estimate-std.error, xmax=estimate+std.error), position = position_dodge(width = 0.5)) +
+    scale_shape_manual(values=c(16,1)) +
+    scale_color_brewer(palette="Set1") +
+    #scale_color_manual(values=ann_colors$age_group) +
+    theme_clean() +
+    theme(
+      strip.text.y = element_text(angle = 0)
+    ) +
+    labs(
+      x="Log difference between groups",
+      y="", color="", shape=""
+    )
+ggsave("perch_Fig1Gb_butanoate.pdf", height=2.6, width=5, useDingbats=F)
+```
+
+
+```{r}
+temp %>% 
+  filter(path %in% "map00052") %>%
+  filter(!is.na(gene_name)) %>%
+  
+  separate(gene_name, into=c("gene_name", "desc"), sep=';') %>%
+  
+  
+  mutate(gene_name = reorder(gene_name, estimate)) %>%
+  mutate(isSig = ifelse(fdr < 0.1, "q<0.1", "q>0.1")) %>%
+  
+  #mutate(Taxa = fct_relabel(Taxa, function(x) sub("Pseudomonadota |Bacteroidota |Bacillota |Actinomycetota", "", x))) %>%
+  
+  #mutate(term = sub("Control without RTI - ", "", term))
+  
+  ggplot(aes(x=estimate, y=gene_name, shape=isSig)) +
+    geom_vline(xintercept=0, linetype=2) +
+    geom_pointrange(aes(xmin=estimate-std.error, xmax=estimate+std.error), position = position_dodge(width = 0.5)) +
+    scale_shape_manual(values=c(16,1)) +
+    scale_color_brewer(palette="Set1") +
+    #scale_color_manual(values=ann_colors$age_group) +
+    theme_clean() +
+    theme(
+      strip.text.y = element_text(angle = 0)
+    ) +
+    labs(
+      x="Log difference between groups",
+      y="", color="", shape=""
+    )
+ggsave("perch_Fig1Gb_galactose.pdf", height=2.6, width=5, useDingbats=F)
+```
+
+
+## Fig1H Maturity index
+
+Only control subjects without malnutrition are used for the training set.
+
+Bacteria with >0.5% mean relative abundance are used
+
+```{r}
+library(randomForest)
+s_mat_healthy <- s_npop %>%
+  filter(study_group %in% c("Control without RTI", "Control with RTI")) %>%
+  filter(malnutrition_baseline %in% "Normal or overweight") %>%
+  #filter(study_group %in% c("Control without RTI")) %>%
+  droplevels()
+
+s_mat_pneumonia <- s_npop %>%
+  filter(study_group_collapse %in% c("Pneumonia") | grepl("Malnutrition", malnutrition_baseline)) %>%
+  filter(death %in% "No") %>%
+  droplevels()
+
+
+taxa_of_interest <- summed_props %>%
+  as.data.frame() %>% 
+  rownames_to_column("Taxa") %>% 
+  pivot_longer(-Taxa, names_to="SampleID", values_to="props") %>%
+  filter(SampleID %in% s_mat_healthy$SampleID) %>%
+  group_by(Taxa) %>%
+  #mutate(perc_present = mean(props > 0)) %>%
+  summarize(mean_prop = mean(props)) %>%
+  ungroup() %>%
+  
+  filter(mean_prop > 0.005) %>%
+  # We only want the species level assignments
+  filter(!Taxa %in% c("Bacteria", "Bacillota Streptococcus", "Bacillota Staphylococcus", "Pseudomonadota Neisseria")) %>%
+  pull(Taxa)
+
+
+rf_data <-  summed_props %>%
+  as.data.frame() %>% 
+  rownames_to_column("Taxa") %>% 
+  pivot_longer(-Taxa, names_to="SampleID", values_to="props") %>%  
+  filter(Taxa %in% taxa_of_interest) %>%
+  select(SampleID, Taxa, props) %>%
+  mutate(Taxa = gsub(" ", "_", Taxa)) %>%
+  mutate(Taxa = gsub("-", "_", Taxa)) %>%
+  pivot_wider(names_from = "Taxa", values_from = "props", values_fill = 0) %>%
+  column_to_rownames(var = "SampleID")
+
+
+training_data <- rf_data[s_mat_healthy$SampleID,]
+testing_data <- rf_data[s_mat_pneumonia$SampleID,]
+
+
+```
+
+```{r}
+set.seed(42)
+rf_model <- randomForest(s_mat_healthy$age_months ~ ., data = training_data, importance=T, ntree=10000)
+print(rf_model)
+```
+
+
+
+```{r fig.height=6, fig.width=12}
+training_df <- tibble(SampleID = names(rf_model$predicted), MMI = as.vector(rf_model$predicted), actual_age = as.vector(rf_model$y)) %>%
+  left_join(select(s_toTest, SampleID, study_group, study_group_collapse, age_group, malnutrition_baseline, malnutrition_baseline_all, current_abx))
+
+# nls = nonlinear least squares
+# SSlogis = Self-starting logistic model
+
+mod1 = nls(MMI ~ SSlogis(actual_age, Asym, xmid, scal), data=training_df)
+# mod1
+
+training_df %>%
+  ggplot(mapping = aes(x=actual_age, y=MMI)) +
+    geom_point(aes(shape=study_group)) +
+    geom_smooth(
+      method = "nls", formula = y ~ SSlogis(x, Asym, xmid, scal),
+      se = FALSE, color="gray30"
+    ) +
+    #annotate(geom="text", x=0, y=40, label=paste("Logistic curve for controls:\nHoriz. asymptote=", round(mod1$m$getPars()['Asym'],2), "\nxmid=", round(mod1$m$getPars()['xmid'],2), "\nscale=", round(mod1$m$getPars()['scal'],2)), hjust = 0) +
+    #scale_color_manual(values = ann_colors$study_group_collapse) +
+    scale_x_continuous(limits=c(0,60)) +
+    scale_shape_manual(values=c(17,2)) +
+    scale_y_continuous(limits=c(0,45)) +
+    theme_clean() +
+    coord_equal() +
+    guides(color="none") +
+    labs(
+      y = "Predicted age", shape="",
+      x = "Actual age", color=""
+    )
+ggsave("perch_Fig1H_MMI.pdf", height=3, width=6, useDingbats=F)
+```
+
+
+## Fig1I Random forest stats
+
+```{r fig.width=10, fig.height=6}
+imp <- importance(rf_model, type = 1)
+imp_df <- tibble(Taxa = dimnames(imp)[[1]], MeanDecAccu = as.vector(imp)) %>%
+  mutate(Taxa = reorder(Taxa, MeanDecAccu)) %>%
+  arrange(-MeanDecAccu)
+
+library(randomForestExplainer)
+
+min_depth_frame <- min_depth_distribution(rf_model)
+#plot_min_depth_distribution(min_depth_frame)
+min_depth_frame_df <- min_depth_frame %>%
+  rename(Taxa = variable) %>%
+  group_by(Taxa) %>%
+  summarize(mean_depth = mean(minimal_depth)) %>%
+  ungroup() 
+```
+
+
+```{r}
+imp_df %>%
+  head(n=15) %>%
+  left_join(min_depth_frame_df, by="Taxa") %>%
+  mutate(Taxa = sub("Pseudomonadota_|Bacteroidota_|Bacillota_|Actinomycetota_", "", Taxa)) %>%
+  mutate(Taxa = gsub("_", " ", Taxa)) %>%
+  
+  pivot_longer(cols=-Taxa) %>%
+  mutate(name = sub("MeanDecAccu", "Mean decrease in accuracy", name)) %>%
+  mutate(name = sub("mean_depth", "Mean minimum depth", name)) %>%
+  
+  mutate(Taxa = fct_reorder(Taxa, value, .fun = `[`, 1)) %>%
+  
+  ggplot(aes(x=value, y=Taxa)) +
+    geom_point() +
+    facet_wrap(~name, scales="free_x") +
+    theme_clean() +
+    theme(
+      #aspect.ratio = 1
+    ) +
+    labs(
+      x="", y=""
+    )
+ggsave("perch_Fig1I_MMI_taxa.pdf", height=3.2, width=7, useDingbats=F)
+```
+
+
+
+
+
+
+```{r eval=F}
+temp_rf_data <-  summed_props %>%
+  as.data.frame() %>% 
+  rownames_to_column("Taxa") %>% 
+  pivot_longer(-Taxa, names_to="SampleID", values_to="props") %>% 
+  
+  group_by(Taxa) %>%
+  mutate(mean_prop = mean(props)) %>%
+  ungroup() %>%
+  filter(mean_prop > 0.001) %>%
+  
+  select(SampleID, Taxa, props) %>%
+  mutate(Taxa = gsub(" ", "_", Taxa)) %>%
+  mutate(Taxa = gsub("-", "_", Taxa)) %>%
+  pivot_wider(names_from = "Taxa", values_from = "props", values_fill = 0) %>%
+  column_to_rownames(var = "SampleID")
+
+
+temp_training_data <- rf_data[s_mat_healthy$SampleID,]
+
+
+cross_validate <- rfcv(temp_training_data, s_mat_healthy$age_months, step=2)
+
+cross_validate$error.cv %>%
+  enframe(name = "n.var", value="error.cv") %>%
+  mutate(n.var = as.numeric(n.var)) %>%
+  
+  ggplot(aes(x=n.var, y=error.cv)) +
+    geom_point()
+```
+
+
+
+
+
+
+
+
+# Figure 2: Microbiome changes in pneumonia
+
+```{r}
+s_toTest <- s_npop %>%
+  filter(death == "No") %>%
+  droplevels()
+```
+
+
+## Fig 2A Alpha diversity
+
+```{r fig.width=8}
+s_toTest %>%
+  mutate(xlabel = fct_relabel(study_group_collapse_control, function (x) gsub(" ", "\n", x))) %>%
+  ggplot(aes(x=xlabel, y=Shannon, color=study_group_collapse_control)) +
+    geom_boxplot(outlier.alpha=0) +
+    geom_quasirandom(aes(shape=current_abx)) +
+    facet_wrap(~age_group, ncol=4) +
+    scale_color_manual(values=ann_colors$study_group_collapse_control) +
+    scale_shape_manual(values=c(16,10)) +
+    scale_y_continuous(limits=c(0.9, 5)) +
+    theme_clean() +
+    theme(
+      aspect.ratio = 1.25,
+      legend.position = "bottom") +
+    guides(color="none", shape="none") +
+    labs(
+      x="", color="", shape="Antibiotics",
+      y="Shannon diversity"
+    )
+ggsave("perch_Fig2A_alpha.pdf", height=3, width=6, useDingbats=F)
+```
+
+
+
+
+
+For each age group: Shannon ~ current_abx + study_group_collapse_control
+
+```{r}
+summaries_df <- s_toTest %>%
+  
+  group_by(age_group) %>%
+  
+  # for regular linear models
+  #do(tidy(lm(alpha ~ study_group, data=.))) %>%
+  do(tidy_lm_posthoc(lm(Shannon ~ current_abx + study_group_collapse_control, data=.), "study_group_collapse_control")) %>%
+  
+  # for linear mixed effects models
+  #do(tidy(nlme::lme(alpha ~ study_group, random=~1|subject_id, data=., na.action=na.omit), effect="fixed")) %>%
+  #do(tidy_lm_posthoc(nlme::lme(alpha ~ study_group, random=~1|subject_id, data=., na.action=na.omit), "study_group")) %>%
+  
+  ungroup() %>%
+  
+  filter(!grepl("Intercept|Residuals", term)) %>%
+  #mutate(term = sub("study_group", "Control - ", term)) %>%
+  #mutate(term = sub("age_group", "0-5 months - ", term)) %>%
+  
+  group_by(term) %>%
+  mutate(fdr = p.adjust(p.value, method="BH")) %>%
+  ungroup()
+
+summaries_df %>%
+  kable_style(fdr, 0.1)
+```
+
+
+
+Only for kids <1 year of age: Shannon ~ is_RSV + current_abx + study_group_collapse_control
+
+```{r}
+summaries_df <- s_toTest %>%
+  
+  filter(age_group %in% c("0-5 months", "6-11 months")) %>%
+  group_by(age_group) %>%
+  
+  # for regular linear models
+  #do(tidy(lm(alpha ~ study_group, data=.))) %>%
+  do(tidy_lm_posthoc(lm(Shannon ~ is_RSV + current_abx + study_group_collapse_control, data=.), "study_group_collapse_control")) %>%
+  
+  # for linear mixed effects models
+  #do(tidy(nlme::lme(alpha ~ study_group, random=~1|subject_id, data=., na.action=na.omit), effect="fixed")) %>%
+  #do(tidy_lm_posthoc(nlme::lme(alpha ~ study_group, random=~1|subject_id, data=., na.action=na.omit), "study_group")) %>%
+  
+  ungroup() %>%
+  
+  filter(!grepl("Intercept|Residuals", term)) %>%
+  #mutate(term = sub("study_group", "Control - ", term)) %>%
+  #mutate(term = sub("age_group", "0-5 months - ", term)) %>%
+  
+  group_by(term) %>%
+  mutate(fdr = p.adjust(p.value, method="BH")) %>%
+  ungroup()
+
+summaries_df %>%
+  kable_style(fdr, 0.1)
+```
+
+
+
+
+Shannon ~ current_abx + age_group + study_group_collapse_control
+
+```{r}
+summaries_df <- s_toTest %>%
+  
+  # for regular linear models
+  #do(tidy(lm(alpha ~ study_group, data=.))) %>%
+  do(tidy_lm_posthoc(lm(Shannon ~ current_abx + age_group + study_group_collapse_control, data=.), "study_group_collapse_control")) %>%
+  
+  # for linear mixed effects models
+  #do(tidy(nlme::lme(alpha ~ study_group, random=~1|subject_id, data=., na.action=na.omit), effect="fixed")) %>%
+  #do(tidy_lm_posthoc(nlme::lme(alpha ~ study_group, random=~1|subject_id, data=., na.action=na.omit), "study_group")) %>%
+  
+  ungroup() %>%
+  
+  filter(!grepl("Intercept|Residuals", term)) 
+
+summaries_df %>%
+  kable_style()
+```
+
+
+
+
+
+## Fig 2B Dysbiosis score
+
+```{r}
+s_toTest %>%
+  mutate(xlabel = fct_relabel(study_group_collapse_control, function (x) gsub(" ", "\n", x))) %>%
+  ggplot(aes(x=xlabel, y=median_dysbiosis, color=study_group_collapse_control)) +
+    geom_boxplot() +
+    geom_quasirandom(aes(shape=current_abx)) +
+    scale_color_manual(values=ann_colors$study_group_collapse_control) +
+    scale_shape_manual(values=c(16,10)) +
+    scale_y_continuous(limits=c(0.49, 1.05)) +
+    facet_wrap(~age_group, ncol=4) +
+    theme_clean() +
+    theme(
+      aspect.ratio = 1.25
+      #axis.text.x=element_text(angle=90, hjust=1, vjust=0.5),
+      #legend.position = "bottom"
+    ) +
+    guides(color="none", shape="none") +
+    labs(
+      x="",
+      y="Dysbiosis score"
+    )
+ggsave("perch_Fig2B_dysbiosis.pdf", height=3, width=6.1, useDingbats=F)
+```
+
+
+
+For each age group: median_dysbiosis ~ current_abx + study_group_collapse_control
+
+```{r}
+summaries_df <- s_toTest %>%
+  
+  group_by(age_group) %>%
+  
+  # for regular linear models
+  #do(tidy(lm(alpha ~ study_group, data=.))) %>%
+  do(tidy_lm_posthoc(lm(median_dysbiosis ~ current_abx + study_group_collapse_control, data=.), "study_group_collapse_control")) %>%
+  
+  # for linear mixed effects models
+  #do(tidy(nlme::lme(alpha ~ study_group, random=~1|subject_id, data=., na.action=na.omit), effect="fixed")) %>%
+  #do(tidy_lm_posthoc(nlme::lme(alpha ~ study_group, random=~1|subject_id, data=., na.action=na.omit), "study_group")) %>%
+  
+  ungroup() %>%
+  
+  filter(!grepl("Intercept|Residuals", term)) %>%
+  #mutate(term = sub("study_group", "Control - ", term)) %>%
+  #mutate(term = sub("age_group", "0-5 months - ", term)) %>%
+  
+  group_by(term) %>%
+  mutate(fdr = p.adjust(p.value, method="BH")) %>%
+  ungroup()
+
+summaries_df %>%
+  kable_style(fdr, 0.1)
+```
+
+
+
+For each age group (for the subjects <12 months old): median_dysbiosis ~ is_RSV + current_abx + study_group_collapse_control
+
+```{r}
+summaries_df <- s_toTest %>%
+  
+  filter(age_group %in% c("0-5 months", "6-11 months")) %>%
+  group_by(age_group) %>%
+  
+  # for regular linear models
+  #do(tidy(lm(alpha ~ study_group, data=.))) %>%
+  do(tidy_lm_posthoc(lm(median_dysbiosis ~ is_RSV + current_abx + study_group_collapse_control, data=.), "study_group_collapse_control")) %>%
+  
+  # for linear mixed effects models
+  #do(tidy(nlme::lme(alpha ~ study_group, random=~1|subject_id, data=., na.action=na.omit), effect="fixed")) %>%
+  #do(tidy_lm_posthoc(nlme::lme(alpha ~ study_group, random=~1|subject_id, data=., na.action=na.omit), "study_group")) %>%
+  
+  ungroup() %>%
+  
+  filter(!grepl("Intercept|Residuals", term)) %>%
+  #mutate(term = sub("study_group", "Control - ", term)) %>%
+  #mutate(term = sub("age_group", "0-5 months - ", term)) %>%
+  
+  group_by(term) %>%
+  mutate(fdr = p.adjust(p.value, method="BH")) %>%
+  ungroup()
+
+summaries_df %>%
+  kable_style(fdr, 0.1)
+```
+
+
+
+median_dysbiosis ~ current_abx + age_group + study_group_collapse_control
+
+```{r}
+summaries_df <- s_toTest %>%
+  
+  # for regular linear models
+  #do(tidy(lm(alpha ~ study_group, data=.))) %>%
+  do(tidy_lm_posthoc(lm(median_dysbiosis ~ current_abx + age_group + study_group_collapse_control, data=.), "study_group_collapse_control")) %>%
+  
+  # for linear mixed effects models
+  #do(tidy(nlme::lme(alpha ~ study_group, random=~1|subject_id, data=., na.action=na.omit), effect="fixed")) %>%
+  #do(tidy_lm_posthoc(nlme::lme(alpha ~ study_group, random=~1|subject_id, data=., na.action=na.omit), "study_group")) %>%
+  
+  filter(!grepl("Intercept|Residuals", term)) 
+
+summaries_df %>%
+  kable_style()
+```
+
+
+
+## Fig 2C Beta diversity
+
+
+```{r  fig.height=2, fig.width=10}
+pc_df <- s_toTest %>%
+  pcoaplus(bc) 
+
+centroids <- pc_df %>%
+  group_by(age_group, study_group_collapse_control) %>%
+  summarize(Axis.1=mean(Axis.1), Axis.2=mean(Axis.2)) %>%
+  ungroup()
+  
+pc_df %>%
+  ggplot(aes(x=Axis.1, y=Axis.2, color=study_group_collapse_control, shape=current_abx)) +
+    geom_point(alpha=0.5) +
+    #stat_ellipse() +
+    geom_point(data=centroids, shape=21, stroke=1, size=2.5, color="black", aes(fill=study_group_collapse_control)) +
+    scale_color_manual(values=ann_colors$study_group_collapse_control) +
+    scale_fill_manual(values=ann_colors$study_group_collapse_control) +
+    scale_shape_manual(values=c(16,10)) +
+    facet_wrap(~age_group, ncol=4) +
+    theme_clean_pcoa() + 
+    labs(
+      x=attr(pc_df, "axislabel")[1],
+      y=attr(pc_df, "axislabel")[2],
+      color="", shape="", fill="")
+
+ggsave("perch_Fig2C_pcoa_NPOP.pdf", height=2, width=7.5, useDingbats=F)
+```
+
+
+
+For each age group: distmat ~ current_abx + study_group_collapse_control
+
+```{r eval=T}
+summaries_df <- s_toTest %>%
+  group_by(age_group) %>%
+  do(adonispost(
+    ., distmat = bc, formula = distmat ~ current_abx + study_group_collapse_control,
+    sample_id_var = SampleID, permutations=999, which = study_group_collapse_control, alpha = 1)) %>%
+  ungroup() %>%
+  filter(!term %in% c("Residual", "Total")) %>%
+  select(-one_of(c("sumsq"))) %>%
+  
+  group_by(comparison) %>%
+  mutate(fdr = p.adjust(p.value, method="BH")) %>%
+  ungroup()
+
+
+# If you don't need the shuffling functionality, you can use
+# summaries_df <- adonisplus(s_toTest, wu, distmat ~ study_group)
+# If you would like to test pairs of groups, use adonispost
+
+summaries_df %>%
+  select(-term)%>%
+  kable_style(fdr, 0.1)
+```
+
+
+
+distmat ~ current_abx + age_group + study_group_collapse_control
+
+```{r eval=T}
+summaries_df <- s_toTest %>%
+  #group_by(age_group) %>%
+  do(adonispost(
+    ., distmat = bc, formula = distmat ~ current_abx + age_group + study_group_collapse_control,
+    sample_id_var = SampleID, permutations=999, which = study_group_collapse_control, alpha = 1)) %>%
+  #ungroup() %>%
+
+  filter(!term %in% c("Residual", "Total")) %>%
+  select(-one_of(c("sumsq"))) 
+
+# If you don't need the shuffling functionality, you can use
+# summaries_df <- adonisplus(s_toTest, wu, distmat ~ study_group)
+# If you would like to test pairs of groups, use adonispost
+
+summaries_df %>%
+  kable_style()
+```
+
+
+## Fig 2D Beta diversity: KEGG
+
+```{r  fig.height=2, fig.width=10}
+pc_df <- s_toTest %>%
+  pcoaplus(bc_kegg) 
+
+centroids <- pc_df %>%
+  group_by(age_group, study_group_collapse_control) %>%
+  summarize(Axis.1=mean(Axis.1), Axis.2=mean(Axis.2)) %>%
+  ungroup()
+  
+pc_df %>%
+  ggplot(aes(x=Axis.1, y=Axis.2, color=study_group_collapse_control, shape=current_abx)) +
+    geom_point(alpha=0.6) +
+    #stat_ellipse() +
+    geom_point(data=centroids, shape=21, stroke=1, size=2.5, color="black", aes(fill=study_group_collapse_control)) +
+    scale_color_manual(values=ann_colors$study_group_collapse_control) +
+    scale_fill_manual(values=ann_colors$study_group_collapse_control) +
+    scale_shape_manual(values=c(16,10)) +
+    facet_wrap(~age_group, ncol=4) +
+    theme_clean_pcoa() + 
+    labs(
+      x=attr(pc_df, "axislabel")[1],
+      y=attr(pc_df, "axislabel")[2],
+      color="", shape="", fill="")
+
+ggsave("perch_Fig2D_pcoa_NPOP_kegg.pdf", height=2, width=7.5, useDingbats=F)
+```
+
+
+For each age group: distmat ~ current_abx + study_group_collapse_control
+
+```{r eval=T}
+summaries_df <- s_toTest %>%
+  group_by(age_group) %>%
+  do(adonispost(
+    ., distmat = bc, formula = distmat ~ current_abx + study_group_collapse_control,
+    sample_id_var = SampleID, permutations=999, which = study_group_collapse_control, alpha = 1)) %>%
+  ungroup() %>%
+  filter(!term %in% c("Residual", "Total")) %>%
+  select(-one_of(c("sumsq"))) %>%
+  
+  group_by(comparison) %>%
+  mutate(fdr = p.adjust(p.value, method="BH")) %>%
+  ungroup()
+
+
+# If you don't need the shuffling functionality, you can use
+# summaries_df <- adonisplus(s_toTest, wu, distmat ~ study_group)
+# If you would like to test pairs of groups, use adonispost
+
+summaries_df %>%
+  select(-term)%>%
+  kable_style(fdr, 0.1)
+```
+
+distmat ~ current_abx + age_group + study_group_collapse_control
+
+```{r eval=T}
+summaries_df <- s_toTest %>%
+  #group_by(age_group) %>%
+  do(adonispost(
+    ., distmat = bc, formula = distmat ~ current_abx + age_group + study_group_collapse_control,
+    sample_id_var = SampleID, permutations=999, which = study_group_collapse_control, alpha = 1)) %>%
+  #ungroup() %>%
+
+  filter(!term %in% c("Residual", "Total")) %>%
+  select(-one_of(c("sumsq"))) 
+
+# If you don't need the shuffling functionality, you can use
+# summaries_df <- adonisplus(s_toTest, wu, distmat ~ study_group)
+# If you would like to test pairs of groups, use adonispost
+
+summaries_df %>%
+  kable_style()
+```
+
+
+## Fig 2E Control - Pneumonia diff abundance
+
+```{r}
+props_toTest <- props_toTest_npop %>%
+  filter(SampleID %in% s_toTest$SampleID) %>%
+  droplevels() 
+```
+
+
+
+For each age group: props_log ~ current_abx + study_group_collapse
+
+
+```{r}
+summaries_df <- props_toTest %>%
+  
+  group_by(Taxa, age_group) %>%
+  
+  # for regular linear models
+  do(tidy(lm(props_log ~ current_abx + study_group_collapse_control, data=.))) %>%
+  #do(tidy_lm_posthoc(lm(props_log ~ study_group_collapse_control, data=.), "study_group_collapse_control")) %>%
+  
+  # for linear mixed effects models
+  #do(tidy(nlme::lme(props_log ~ study_group, random=~1|subject_id, data=., na.action=na.omit), effect="fixed")) %>%
+  #do(tidy_lm_posthoc(nlme::lme(props_log ~ study_group, random=~1|subject_id, data=., na.action=na.omit), "study_group")) %>%
+
+  ungroup() %>%
+  
+  filter(!grepl("Intercept|Residuals", term)) %>%
+  mutate(term = sub("study_group_collapse_control", "Control - ", term)) %>%
+  mutate(term = sub("age_group", "0-5 months - ", term)) %>%
+  
+  group_by(term, age_group) %>%
+  mutate(fdr = p.adjust(p.value, method="BH")) %>%
+  ungroup()
+```
+
+
+```{r fig.width=8, fig.height=4}
+
+summaries_df %>%
+  filter(!grepl("abx", term)) %>%
+  group_by(Taxa) %>%
+  mutate(num_sig = any(fdr<0.1)) %>%
+  ungroup() %>%
+  filter(num_sig) %>%
+  
+  mutate(Taxa = reorder(Taxa, estimate)) %>%
+  mutate(isSig = ifelse(fdr < 0.1, "q<0.1", "q>0.1")) %>%
+  
+  mutate(Taxa = fct_relabel(Taxa, function(x) sub("Pseudomonadota |Bacteroidota |Bacillota |Actinomycetota", "", x))) %>%
+  
+  ggplot(aes(x=estimate, y=Taxa, color=term, shape=isSig)) +
+    geom_vline(xintercept=0, linetype=2) +
+    geom_pointrange(aes(xmin=estimate-std.error, xmax=estimate+std.error), position = position_dodge(width = 0.5)) +
+    scale_shape_manual(values=c(16,1)) +
+    #scale_color_manual(values=ann_colors$age_group) +
+    #facet_wrap(~term) +
+    scale_color_manual(values=unname(ann_colors$study_group_collapse_control)[c(2,3)]) +
+    facet_wrap(~age_group, ncol=4) +
+    theme_clean() +
+    theme(
+      strip.text.y = element_text(angle = 0)
+    ) +
+    labs(
+      x="Log difference between groups",
+      y="", color="", shape=""
+    )
+ggsave("perch_Fig2E_diffAb2.pdf", height=4, width=9, useDingbats=F)
+```
+
+For each age group: props_log ~ current_abx + is_RSV + study_group_collapse
+
+
+```{r}
+summaries_df <- props_toTest %>%
+  
+  filter(age_group %in% c("0-5 months", "6-11 months")) %>%
+  group_by(Taxa, age_group) %>%
+  
+  # for regular linear models
+  do(tidy(lm(props_log ~ current_abx + is_RSV + study_group_collapse_control, data=.))) %>%
+  #do(tidy_lm_posthoc(lm(props_log ~ study_group, data=.), "study_group")) %>%
+  
+  # for linear mixed effects models
+  #do(tidy(nlme::lme(props_log ~ study_group, random=~1|subject_id, data=., na.action=na.omit), effect="fixed")) %>%
+  #do(tidy_lm_posthoc(nlme::lme(props_log ~ study_group, random=~1|subject_id, data=., na.action=na.omit), "study_group")) %>%
+
+  ungroup() %>%
+  
+  filter(!grepl("Intercept|Residuals", term)) %>%
+  mutate(term = sub("study_group_collapse_control", "Control - ", term)) %>%
+  mutate(term = sub("age_group", "0-5 months - ", term)) %>%
+  
+  group_by(term, age_group) %>%
+  mutate(fdr = p.adjust(p.value, method="BH")) %>%
+  ungroup()
+```
+
+
+```{r fig.width=10, fig.height=4}
+
+summaries_df %>%
+  filter(!grepl("abx", term)) %>%
+  group_by(Taxa) %>%
+  mutate(num_sig = any(fdr<0.1)) %>%
+  ungroup() %>%
+  filter(num_sig) %>%
+  
+  mutate(Taxa = reorder(Taxa, estimate)) %>%
+  mutate(isSig = ifelse(fdr < 0.1, "q<0.1", "q>0.1")) %>%
+  
+  mutate(Taxa = fct_relabel(Taxa, function(x) sub("Pseudomonadota |Bacteroidota |Bacillota |Actinomycetota", "", x))) %>%
+  
+  ggplot(aes(x=estimate, y=Taxa, color=age_group, shape=isSig)) +
+    geom_vline(xintercept=0, linetype=2) +
+    geom_pointrange(aes(xmin=estimate-std.error, xmax=estimate+std.error), position = position_dodge(width = 0.5)) +
+    scale_shape_manual(values=c(16,1)) +
+    scale_color_manual(values=ann_colors$age_group) +
+    facet_wrap(~term) +
+    theme_clean() +
+    theme(
+      strip.text.y = element_text(angle = 0)
+    ) +
+    labs(
+      x="Log difference between groups",
+      y="", color="", shape=""
+    )
+```
+
+
+## Fig 2F Select taxa
+
+```{r fig.height=8}
+props_toTest %>%
+  
+  filter(Taxa %in% c("Bacillota Streptococcus lactarius", "Bacillota Streptococcus parasanguinis", "Pseudomonadota Enterobacteriaceae", "Bacillota Streptococcus pneumoniae")) %>%
+  #filter(Taxa %in% c("Bacillota Streptococcus lactarius", "Pseudomonadota Enterobacteriaceae")) %>%
+  mutate(Taxa = fct_relabel(Taxa, function(x) sub("Pseudomonadota |Bacteroidota |Bacillota |Actinomycetota", "", x))) %>%
+  
+  #mutate(Taxa = fct_relabel(Taxa, function(x) gsub(" ", "\n", x))) %>%
+  mutate(age_groups = fct_relabel(age_group, function(x) gsub(" ", "\n", x))) %>%
+  ggplot(aes(x=age_groups, y=props, color=study_group_collapse_control)) +
+    geom_boxplot(outlier.alpha=0) +
+    geom_quasirandom(size=0.9, dodge.width=0.75, aes(shape=current_abx, group=study_group_collapse_control)) +
+    facet_wrap(~Taxa, ncol = 2) +
+    scale_color_manual(values=ann_colors$study_group_collapse_control) +
+    scale_shape_manual(values=c(16,10)) +
+    scale_y_continuous(labels=scales:::percent, trans="log10", limits = c(9e-9, 15)) +
+    theme_clean() +
+    theme(
+      #axis.text.x=element_text(angle=90, hjust=1, vjust=0.5),
+      legend.position = "bottom",
+      
+    ) +
+    #guides(color="none") +
+    labs(
+      x="", color="", shape="",
+      y="Relative abundance"
+    )
+ggsave("perch_Fig2F_select_taxa.pdf", height=4.7, width=5.8, useDingbats=F)
+```
+
+
+
+## Supp fig XX: Vaccination
+
+```{r}
+props_toTest <- props_toTest_npop %>%
+  filter(SampleID %in% s_toTest$SampleID) %>%
+  filter(Taxa %in% c("Pseudomonadota Haemophilus influenzae", "Bacillota Streptococcus pneumoniae")) %>%
+  mutate(vaccination_status = ifelse(Taxa %in% "Pseudomonadota Haemophilus influenzae", Haemophilus_influenzae_typeB_vaccine, Pneumococcal_conjugate_vaccine)) %>%
+  droplevels() %>%
+  mutate(vaccination_status = factor(vaccination_status)) %>%
+  mutate(vaccination_status = fct_collapse(vaccination_status, Vaccinated = c("Fully vaccinated", "Partially vaccinated"))) 
+```
+
+
+```{r fig.width=10, fig.height=4}
+props_toTest %>%
+  ggplot(aes(x=age_group, y=props, color=study_group_collapse_control, shape=vaccination_status)) +
+    geom_boxplot(outlier.alpha=0) +
+    geom_quasirandom(dodge.width=0.75) +
+    scale_color_manual(values=ann_colors$study_group_collapse_control) +
+    scale_shape_manual(values=c(16,1)) +
+    scale_y_continuous(labels=scales:::percent, trans="log10") +
+    facet_wrap(~Taxa) +
+    theme_clean()
+ggsave("perch_Supp_FigX_vaccine.pdf", height=3, width=13, useDingbats=F)
+```
+
+
+## Fig 2H KEGG
+
+```{r}
+genes_toTest <- genes_npop %>%
+  filter(SampleID %in% s_toTest$SampleID) %>%
+  droplevels() 
+```
+
+
+For each age group: props_log ~ current_abx + study_group_collapse_control
+
+```{r}
+summaries_df <- genes_toTest %>%
+  
+  group_by(geneID, gene_name, age_group) %>%
+  do(tidy(lm(props_log ~ current_abx + study_group_collapse_control, data=.))) %>%
+  #do(tidy_lm_posthoc(lm(props_log ~ current_abx + study_group_collapse_control, data=.), "study_group_collapse_control")) %>%
+  ungroup() %>%
+  
+  filter(!grepl("Intercept", term)) %>%
+  mutate(term = sub("study_group_collapse_control", "Control - ", term)) %>% ### Or whatever the reference level is
+  
+  group_by(term, age_group) %>%
+  mutate(fdr = p.adjust(p.value, method="BH")) %>%
+  ungroup()
+```
+
+
+
+```{r fig.height=4, fig.width=8}
+## find the pathways the fdr<0.1 genes are in
+sig_genes <- summaries_df %>%
+  filter(grepl("Control", term)) %>%
+  #filter(!is.na(estimate)) %>%
+  # it so happened that all the fdr<0.1 ones were control - very severe
+  #filter(term %in% "Control - Very severe case") %>%
+  filter(fdr < 0.1)  %>%
+  droplevels()
+  
+enrichment_tests <- sig_genes %>%
+  left_join(ko2path, by="geneID") %>%
+  filter(path %in% path_list$path) %>%
+  filter(!is.na(path)) %>%
+  mutate(gene_name = paste(geneID, gene_name)) %>%
+  group_by(path, age_group, term) %>%
+  summarize(num_sig_genes = n(), 
+            genes = paste(gene_name, collapse = ", "), 
+            num_pos = sum(estimate>0), 
+            num_neg = sum(estimate<0)) %>%
+  ungroup() %>%
+  left_join(num_genes_in_pathway, by="path") %>%
+  filter(num_genes_in_path > 1) %>%
+  
+  group_by(path, age_group, term) %>%
+  mutate(sig_genes_thresh = num_sig_genes > 1) %>%
+  ungroup() %>%
+  group_by(path) %>%
+  mutate(max_sig_genes_thresh = any(sig_genes_thresh)) %>%
+  filter(max_sig_genes_thresh) %>%
+  
+  mutate(p.value = 1 - phyper(num_sig_genes, num_genes_in_path, num_gene_universe-num_genes_in_path, nrow(sig_genes))) %>%
+  mutate(fdr = p.adjust(p.value, method="BH")) %>%
+  left_join(path_list, by="path") %>%
+  mutate(perc_sig = num_sig_genes/num_genes_in_path) %>%
+  mutate(path_text = paste0(num_pos, "+;", num_neg, "-"))
+
+
+enrichment_tests %>%
+  filter(fdr<0.05) %>% 
+  
+  group_by(age_group) %>%
+  mutate(rank = rank(perc_sig)) %>%
+  ungroup() %>%
+  
+  mutate(age_group = fct_relabel(age_group, function(x) sub(" ", "\n", x))) %>%
+  
+  mutate(path_name = reorder(path_name, rank)) %>%
+  ggplot(aes(x = perc_sig, y=path_name, fill=num_sig_genes)) +
+    geom_bar(stat="identity") +
+    geom_text(aes(label=path_text), nudge_x = 0.03, size=3) +
+    scale_fill_viridis(trans="log10", option="magma", end=0.8) +
+    #scale_color_manual(values=ann_colors$age_group) +
+    scale_x_continuous(labels=scales:::percent) +
+    #facet_wrap(~age_group) +
+    facet_grid(age_group + term ~., scales="free", space="free") +
+    theme_clean() +
+    theme(
+      strip.text.y = element_text(angle = 0),
+      legend.position = "bottom", 
+      legend.direction = "horizontal"
+    ) +
+    labs(
+      x= "Percent of genes in pathway\nassociated with comparison",
+      y="", fill="Number of\ngenes\nq<0.1"
+    )
+ggsave("perch_Fig2H_pathway_enrichments.pdf", height=4, width=9, useDingbats=F)
+```
+
+
+```{r}
+summaries_df %>% 
+  filter(fdr < 0.1) %>% 
+  filter(!grepl("abx", term)) %>% 
+  select(gene_name, age_group, term, estimate) %>% 
+  mutate(direction = ifelse(estimate > 0, "up", "down")) %>% 
+  group_by(age_group, term, direction) %>% 
+  count()
+```
+
+## Fig 2G severe vs very severe
+
+```{r}
+props_toTest <- props_toTest_npop %>%
+  filter(SampleID %in% s_toTest$SampleID) %>%
+  filter(study_group_collapse %in% "Pneumonia") %>%
+  droplevels() 
+```
+
+
+For each age group: props_log ~ study_group
+
+
+```{r}
+summaries_df <- props_toTest %>%
+  
+  group_by(Taxa, age_group) %>%
+  
+  # for regular linear models
+  do(tidy(lm(props_log ~ study_group, data=.))) %>%
+  #do(tidy_lm_posthoc(lm(props_log ~ study_group, data=.), "study_group")) %>%
+  
+  # for linear mixed effects models
+  #do(tidy(nlme::lme(props_log ~ study_group, random=~1|subject_id, data=., na.action=na.omit), effect="fixed")) %>%
+  #do(tidy_lm_posthoc(nlme::lme(props_log ~ study_group, random=~1|subject_id, data=., na.action=na.omit), "study_group")) %>%
+
+  ungroup() %>%
+  
+  filter(!grepl("Intercept|Residuals", term)) %>%
+  mutate(term = sub("study_group_collapse", "Control - ", term)) %>%
+  mutate(term = sub("age_group", "0-5 months - ", term)) %>%
+  
+  group_by(term, age_group) %>%
+  mutate(fdr = p.adjust(p.value, method="BH")) %>%
+  ungroup()
+
+summaries_df %>%
+  filter(fdr<0.1) %>%
+  kable_style()
+```
+
+
+
+
+
+For each age group: props_log ~ current_abx + study_group
+
+
+```{r}
+summaries_df <- props_toTest %>%
+  
+  group_by(Taxa, age_group) %>%
+  
+  # for regular linear models
+  do(tidy(lm(props_log ~ current_abx + study_group, data=.))) %>%
+  #do(tidy_lm_posthoc(lm(props_log ~ study_group, data=.), "study_group")) %>%
+  
+  # for linear mixed effects models
+  #do(tidy(nlme::lme(props_log ~ study_group, random=~1|subject_id, data=., na.action=na.omit), effect="fixed")) %>%
+  #do(tidy_lm_posthoc(nlme::lme(props_log ~ study_group, random=~1|subject_id, data=., na.action=na.omit), "study_group")) %>%
+
+  ungroup() %>%
+  
+  filter(!grepl("Intercept|Residuals", term)) %>%
+  mutate(term = sub("study_group", "Severe - ", term)) %>%
+  mutate(term = sub("current_abxYes", "Abx", term)) %>%
+  
+  group_by(term, age_group) %>%
+  mutate(fdr = p.adjust(p.value, method="BH")) %>%
+  ungroup()
+
+summaries_df %>%
+  filter(fdr<0.1) %>%
+  kable_style()
+```
+
+
+
+
+```{r}
+taxa_toPlot <- summaries_df %>%
+  filter(!grepl("Abx", term)) %>%
+  filter(fdr<0.1) %>%
+  pull(Taxa) %>%
+  as.character()
+
+props_toTest %>%
+  
+  filter(Taxa %in% taxa_toPlot) %>%
+  mutate(Taxa = fct_relabel(Taxa, function(x) sub("Pseudomonadota |Bacillota ", "", x))) %>%
+  
+  #group_by(Taxa) %>%
+  #mutate(max_prop = max(props) * 3) %>%
+  #ungroup() %>%
+  
+  #mutate(Taxa = fct_relabel(Taxa, function(x) gsub(" ", "\n", x))) %>%
+  mutate(age_groups = fct_relabel(age_group, function(x) gsub(" ", "\n", x))) %>%
+  ggplot(aes(x=age_groups, y=props, color=study_group_collapse_control)) +
+    #geom_hline(aes(yintercept=max_prop), color="white") +
+    geom_boxplot(outlier.alpha=0) +
+    geom_quasirandom(dodge.width=0.75,  aes(shape=current_abx, group=study_group_collapse_control)) +
+    facet_wrap(~Taxa, ncol = 2) +
+    scale_color_manual(values=ann_colors$study_group_collapse_control) +
+    scale_shape_manual(values=c(16,10)) +
+    scale_y_continuous(labels=scales:::percent, trans="log10", limits=c(9e-9, 5)) +
+    theme_clean() +
+    theme(
+      #axis.text.x=element_text(angle=90, hjust=1, vjust=0.5),
+      legend.position = "bottom"
+    ) +
+    #guides(color="none") +
+    labs(
+      x="", color="", shape="Antibiotics",
+      y="Relative abundance"
+    )
+ggsave("perch_Fig2G_select_taxa.pdf", height=3.5, width=4, useDingbats=F)
+```
+
+
+## SuppFig 3A Sputum samples
+
+```{r}
+s_toTest <- s %>%
+  filter(Keep) %>%
+  filter(!isControl) %>%
+  filter(sample_type %in% c("Induced Sputum")) %>%
+  filter(study_group_collapse %in% "Case") %>%
+  filter(death %in% "No") %>%
+  droplevels() %>%
+  
+  mutate(age_group = factor(age_group, levels=c("0-5 months", "6-11 months", "12-23 months", "24-59 months"))) %>%
+  mutate(age_group_linear = factor(age_group, ordered=T))
+
+## Change this to be the breakdown of whatever variable the collaborator is interested in
+addmargins(table(s_toTest$current_abx, s_toTest$study_group, useNA = "ifany")) %>%
+  pander(split.table=Inf)
+
+```
+
+
+```{r}
+pc_df <- s_toTest %>%
+  pcoaplus(bc) 
+
+centroids <- pc_df %>%
+  group_by(age_group, study_group) %>%
+  summarize(Axis.1=mean(Axis.1), Axis.2=mean(Axis.2)) %>%
+  ungroup()
+  
+pc_df %>%
+  ggplot(aes(x=Axis.1, y=Axis.2, color=study_group, shape=current_abx)) +
+    geom_point(alpha=0.5) +
+    #stat_ellipse() +
+    geom_point(data=centroids, shape=21, stroke=1, size=2.5, color="black", aes(fill=study_group)) +
+    scale_color_manual(values=ann_colors$study_group_collapse_control) +
+    scale_fill_manual(values=ann_colors$study_group_collapse_control) +
+    scale_shape_manual(values=c(16,10)) +
+    facet_wrap(~age_group, ncol=4) +
+    theme_clean_pcoa() + 
+    labs(
+      x=attr(pc_df, "axislabel")[1],
+      y=attr(pc_df, "axislabel")[2],
+      color="", shape="Antibiotics", fill="")
+
+ggsave("perch_SuppFig3A_pcoa_sputum.pdf", height=2, width=7.5, useDingbats=F)
+```
+
+
+For each age group: distmat ~ current_abx + study_group
+
+```{r eval=T}
+summaries_df <- s_toTest %>%
+  group_by(age_group) %>%
+  do(adonisplus(
+    ., distmat = bc, formula = distmat ~ current_abx + study_group,
+    sample_id_var = SampleID, permutations=999)) %>%
+  ungroup() %>%
+  filter(!term %in% c("Residual", "Total")) %>%
+  select(-one_of(c("sumsq"))) %>%
+  group_by(term) %>%
+  mutate(fdr = p.adjust(p.value, method="BH")) %>%
+  ungroup()
+
+
+# If you don't need the shuffling functionality, you can use
+# summaries_df <- adonisplus(s_toTest, wu, distmat ~ study_group)
+# If you would like to test pairs of groups, use adonispost
+
+summaries_df %>%
+  kable_style()
+```
+
+
+```{r eval=T}
+summaries_df <- s_toTest %>%
+  #group_by(age_group) %>%
+  do(adonispost(
+    ., distmat = bc, formula = distmat ~ current_abx + study_group + age_group,
+    sample_id_var = SampleID, permutations=999, which = age_group, alpha=1)) %>%
+  #ungroup() %>%
+  filter(!term %in% c("Residual", "Total")) %>%
+  select(-one_of(c("sumsq"))) %>%
+  
+  group_by(term) %>%
+  mutate(fdr = p.adjust(p.value, method="BH")) %>%
+  ungroup()
+
+
+# If you don't need the shuffling functionality, you can use
+# summaries_df <- adonisplus(s_toTest, wu, distmat ~ study_group)
+# If you would like to test pairs of groups, use adonispost
+
+summaries_df %>%
+  kable_style(fdr, 0.1)
+```
+
+
+## SuppFig 3B Sputum diff ab
+
+```{r}
+props_toTest <- summed_props %>%
+  as.data.frame() %>% 
+  rownames_to_column("Taxa") %>% 
+  pivot_longer(-Taxa, names_to="SampleID", values_to="props") %>%
+  right_join(s_toTest, by="SampleID")  %>%
+  
+  group_by(Taxa, study_group) %>%
+  mutate(perc_present = mean(props > 0)) %>%
+  mutate(mean_prop = mean(props)) %>%
+  ungroup() %>%
+  
+  group_by(Taxa) %>%
+  mutate(max_mean_prop = max(mean_prop)) %>%
+  ungroup() %>%
+  
+  filter(max_mean_prop > 0.01) %>%
+  
+  # We only want the species level assignments
+  #filter(!Taxa %in% c("Bacteria", "Bacillota Streptococcus", "Pseudomonadota Haemophilus", "Pseudomonadota Klebsiella")) %>% 
+  filter(!Taxa %in% c("Bacteria", "Bacillota Streptococcus")) %>% 
+  
+  mutate(props_original = props) %>%
+  mutate(props = props + min(filter(., props>0)$props) / 10) %>%
+  mutate(props_log = log10(props))
+```
+
+
+For each age group: props_log ~ current_abx + study_group
+
+
+```{r}
+summaries_df <- props_toTest %>%
+  
+  group_by(Taxa, age_group) %>%
+  
+  # for regular linear models
+  do(tidy(lm(props_log ~ current_abx + study_group, data=.))) %>%
+  #do(tidy_lm_posthoc(lm(props_log ~ study_group, data=.), "study_group")) %>%
+  
+  # for linear mixed effects models
+  #do(tidy(nlme::lme(props_log ~ study_group, random=~1|subject_id, data=., na.action=na.omit), effect="fixed")) %>%
+  #do(tidy_lm_posthoc(nlme::lme(props_log ~ study_group, random=~1|subject_id, data=., na.action=na.omit), "study_group")) %>%
+
+  ungroup() %>%
+  
+  filter(!grepl("Intercept|Residuals", term)) %>%
+  mutate(term = sub("study_group_collapse", "Control - ", term)) %>%
+  mutate(term = sub("age_group", "0-5 months - ", term)) %>%
+  
+  group_by(term, age_group) %>%
+  mutate(fdr = p.adjust(p.value, method="BH")) %>%
+  ungroup()
+```
+
+
+
+```{r fig.width=6, fig.height=2}
+
+summaries_df %>%
+  filter(!grepl("current_abx", term)) %>%
+  
+  group_by(Taxa) %>%
+  mutate(num_sig = any(fdr<0.1)) %>%
+  ungroup() %>%
+  filter(num_sig) %>%
+  
+  mutate(Taxa = reorder(Taxa, estimate)) %>%
+  mutate(isSig = ifelse(fdr < 0.1, "q<0.1", "q>0.1")) %>%
+  
+  mutate(Taxa = fct_relabel(Taxa, function(x) sub("Pseudomonadota |Bacteroidota |Bacillota |Actinomycetota", "", x))) %>%
+  
+  ggplot(aes(x=estimate, y=Taxa, color=age_group, shape=isSig)) +
+    geom_vline(xintercept=0, linetype=2) +
+    geom_pointrange(aes(xmin=estimate-std.error, xmax=estimate+std.error), position = position_dodge(width = 0.5)) +
+    scale_shape_manual(values=c(16,1)) +
+    scale_color_manual(values=ann_colors$age_group) +
+    theme_clean() +
+    theme(
+      strip.text.y = element_text(angle = 0)
+    ) +
+    labs(
+      x="Log difference between groups",
+      y="", color="", shape=""
+    )
+ggsave("perch_SuppFig3B_diffAb.pdf", height=1.5, width=5.3, useDingbats=F)
+```
+
+Age association in the sputum
+
+props_log ~ study_group + age_group_linear
+
+```{r}
+summaries_df <- props_toTest %>%
+  
+  group_by(Taxa) %>%
+  
+  # for regular linear models
+  do(tidy(lm(props_log ~ study_group + age_group_linear, data=.))) %>%
+  #do(tidy_lm_posthoc(lm(props_log ~ study_group, data=.), "study_group")) %>%
+  
+  # for linear mixed effects models
+  #do(tidy(nlme::lme(props_log ~ study_group, random=~1|subject_id, data=., na.action=na.omit), effect="fixed")) %>%
+  #do(tidy_lm_posthoc(nlme::lme(props_log ~ study_group, random=~1|subject_id, data=., na.action=na.omit), "study_group")) %>%
+
+  ungroup() %>%
+  
+  filter(!grepl("Intercept|Residuals", term)) %>%
+  mutate(term = sub("study_group", "Control - ", term)) %>%
+  #mutate(term = sub("age_group", "0-5 months - ", term)) %>%
+  
+  group_by(term) %>%
+  mutate(fdr = p.adjust(p.value, method="BH")) %>%
+  ungroup()
+
+#summaries_df %>%
+#  filter(p.value < 0.05) %>%
+#  kable_style(fdr, 0.1) %>%
+#  column_spec(c(1:2), width = "15em")
+```
+
+
+
+
+
+
+
+```{r fig.width=6, fig.height=4}
+
+summaries_df %>%
+  ## we don't care about the quadratic or cubic terms (None are q<0.1 anyways)
+  #filter(term == "age_group_linear.L") %>%
+  filter(fdr<0.1) %>%
+  arrange(Taxa, term) %>%
+  mutate(Taxa = fct_reorder(Taxa, estimate, .fun = `[`, 1)) %>%
+  
+  #mutate(Taxa = reorder(Taxa, estimate)) %>%
+  mutate(isSig = ifelse(fdr < 0.1, "q<0.1", "q>0.1")) %>%
+  
+  mutate(Taxa = fct_relabel(Taxa, function(x) sub("Pseudomonadota |Bacteroidota |Bacillota |Actinomycetota", "", x))) %>%
+  
+  mutate(term = factor(term)) %>%
+  mutate(term = fct_recode(term, `Linear term`="age_group_linear.L", `Quadratic term`="age_group_linear.Q")) %>%
+  
+  ggplot(aes(x=estimate, y=Taxa, color=term)) +
+    geom_vline(xintercept=0, linetype=2) +
+    geom_pointrange(aes(xmin=estimate-std.error, xmax=estimate+std.error),  position = position_dodge(width = 0.5)) +
+    scale_color_manual(values=c("gray10", "gray70")) +
+    theme_clean() +
+    theme(
+      strip.text.y = element_text(angle = 0),
+      legend.position = "bottom"
+    ) +
+    labs(
+      x="Log increase with age",
+      y="", color="", shape=""
+    )
+ggsave("perch_diffAb_withQuadratic_sputum.pdf", height=4.8, width=5, useDingbats=F)
+```
+
+## Sputum / NPOP Pairwise analysis
+
+```{r}
+s_pairwise <- s_npop %>%
+  filter(subject_id %in% s_toTest$subject_id) %>%
+  bind_rows(s_toTest)
+
+#table(s_pairwise$sample_type, s_pairwise$subject_id)
+```
+
+
+```{r}
+pairwise_dists <- bind_rows(
+  as.matrix(bc) %>%
+    as_tibble(rownames="SampleID.x") %>%
+    pivot_longer(names_to="SampleID.y", values_to="distance", -SampleID.x) %>%
+    mutate(metric = "Bray-Curtis"),
+  
+  as.matrix(jd) %>%
+    as_tibble(rownames="SampleID.x") %>%
+    pivot_longer(names_to="SampleID.y", values_to="distance", -SampleID.x) %>%
+    mutate(metric = "Jaccard")
+  ) %>%
+  filter(SampleID.x != SampleID.y) %>%
+  left_join(select(s_pairwise, SampleID.x=SampleID, subject_id, sample_type, current_abx, study_group_death, age_group), by="SampleID.x") %>%
+  left_join(select(s_pairwise, SampleID.y=SampleID, subject_id, sample_type, current_abx), by="SampleID.y") %>%
+  filter(subject_id.x == subject_id.y) %>%
+  filter(sample_type.x %in% "NPOP VTM") %>%
+  filter(sample_type.y %in% "Induced Sputum")  %>%
+  select(-subject_id.y) %>%
+  rename(ParticipantID=subject_id.x) %>%
+  mutate(current_abx = ifelse(current_abx.x %in% "Yes" | current_abx.y %in% "Yes", "Yes", "No"))
+```
+
+
+
+For each age group: distance ~ current_abx + study_group_death
+
+```{r}
+summaries_df <- pairwise_dists %>%
+  
+  group_by(metric, age_group) %>%
+  
+  # for regular linear models
+  do(tidy(lm(distance ~ current_abx + study_group_death, data=.))) %>%
+  #do(tidy_lm_posthoc(lm(alpha ~ current_abx + study_group, data=.), "study_group")) %>%
+  
+  # for linear mixed effects models
+  #do(tidy(nlme::lme(alpha ~ study_group, random=~1|subject_id, data=., na.action=na.omit), effect="fixed")) %>%
+  #do(tidy_lm_posthoc(nlme::lme(alpha ~ study_group, random=~1|subject_id, data=., na.action=na.omit), "study_group")) %>%
+  
+  ungroup() %>%
+  
+  filter(!grepl("Intercept|Residuals", term)) %>%
+  mutate(term = sub("study_group_death", "Severe - ", term)) %>%
+  #mutate(term = sub("age_group", "0-5 months - ", term)) %>%
+  
+  group_by(metric, term) %>%
+  mutate(fdr = p.adjust(p.value, method="BH")) %>%
+  ungroup()
+
+summaries_df %>%
+  kable_style(fdr, 0.1)
+```
+
+
+For each age group: distance ~ current_abx + study_group_death
+
+```{r}
+summaries_df <- pairwise_dists %>%
+  
+  group_by(metric, age_group, study_group_death) %>%
+  
+  # for regular linear models
+  do(tidy(lm(distance ~ current_abx, data=.))) %>%
+  #do(tidy_lm_posthoc(lm(alpha ~ current_abx + study_group, data=.), "study_group")) %>%
+  
+  # for linear mixed effects models
+  #do(tidy(nlme::lme(alpha ~ study_group, random=~1|subject_id, data=., na.action=na.omit), effect="fixed")) %>%
+  #do(tidy_lm_posthoc(nlme::lme(alpha ~ study_group, random=~1|subject_id, data=., na.action=na.omit), "study_group")) %>%
+  
+  ungroup() %>%
+  
+  filter(!grepl("Intercept|Residuals", term)) %>%
+  mutate(term = sub("study_group_death", "Severe - ", term)) %>%
+  #mutate(term = sub("age_group", "0-5 months - ", term)) %>%
+  
+  group_by(metric, term) %>%
+  mutate(fdr = p.adjust(p.value, method="BH")) %>%
+  ungroup()
+
+summaries_df %>%
+  kable_style(fdr, 0.1)
+```
+
+
+
+```{r fig.width=10, fig.height=4}
+pairwise_dists %>%
+  filter(metric %in% "Bray-Curtis") %>%
+  mutate(x = gsub(" ", "\n", study_group_death)) %>%
+  ggplot(aes(x=x, y=distance, shape=current_abx, color=study_group_death)) +
+    geom_boxplot(outlier.alpha=0) +
+    geom_quasirandom(dodge.width=0.75) +
+    scale_shape_manual(values=c(16,1)) +
+    scale_color_manual(values=ann_colors$study_group_death) +
+    facet_grid(.~age_group) +
+    theme_clean() +
+    theme(
+      legend.position = "bottom"
+    ) +
+    guides(color="none") +
+    labs(
+      x="", shape="Abx", color="",
+      y="Bray-Curtis distance between\nNP/OP and sputum samples"
+    )
+#ggsave("perch_SuppFig2C_pairwise.pdf", height=3.5, width=6, useDingbats=F)
+```
+
+## Dirichlet 
+
+
+
+
+
+```{r eval=F}
+library(polyafit)
+matrix.please<-function(x) {
+    m<-as.matrix(x[,-1])
+    rownames(m)<-x[[1]]
+    m
+}
+
+pfit_results <- counts %>%
+  as.data.frame() %>% 
+  rownames_to_column("Taxid") %>% 
+  pivot_longer(-Taxid, names_to="SampleID", values_to="counts") %>%
+  right_join(select(s_pairwise, SampleID, subject_id, sample_type), by="SampleID")  %>%
+  right_join(enframe(a, name = "Taxid", value="Taxa"), by="Taxid") %>%
+  select(-Taxid) %>%
+  select(-SampleID) %>%
+  
+  #mutate(Taxa = fct_other(Taxa, keep=unique(props_pairwise$Taxa))) %>%
+  #group_by(Taxa, subject_id, sample_type) %>%
+  #summarize(counts = sum(counts)) %>%
+  #ungroup() %>%
+  
+  pivot_wider(names_from="sample_type", values_from="counts") %>%
+  filter(!is.na(`Induced Sputum`) & !is.na(`NPOP VTM`)) %>%
+  
+  nest_by(subject_id) %>%
+  mutate(model = list(pfit(t(matrix.please(data))))) %>%
+  ungroup()
+saveRDS(pfit_results, "perch_pfit_results_all.rds")
+```
+
+
+```{r eval=F}
+pfit_results_pvalues <- pfit_results %>%
+  group_by(subject_id) %>%
+  summarize(feature_enrichment(model[[1]])) %>%
+  ungroup() %>%
+  #View() #%>%
+  #filter(observation == "counts.x") %>%
+  #select(-observation) %>%
+  mutate(p.value = ifelse(p.value<0, 0, p.value))
+write.table(pfit_results_pvalues, file="perch_pfit_results_pvalues.txt", sep='\t', row.names=F, quote=F)
+
+pfit_results_theta <- pfit_results %>%
+  group_by(subject_id) %>%
+  summarize(theta = model[[1]]$theta) %>%
+  ungroup()
+write.table(pfit_results_theta, file="perch_pfit_results_theta.txt", sep='\t', row.names=F, quote=F)
+```
+
+
+```{r}
+pfit_results_pvalues <- read_delim("perch_pfit_results_pvalues.txt", show_col_types = FALSE) %>%
+  rename(Taxa=feature, sample_type=observation) %>%
+  #filter(sample_type %in% c("Induced Sputum")) %>%
+  group_by(sample_type) %>%
+  mutate(fdr = p.adjust(p.value, method="BH")) %>%
+  ungroup()
+```
+
+```{r}
+pfit_results_theta <- read_delim("perch_pfit_results_theta.txt", show_col_types = FALSE)
+```
+
+
+```{r}
+taxa_of_interest <- pfit_results_pvalues %>%
+  filter(sample_type %in% "Induced Sputum") %>%
+  left_join(select(s_npop, subject_id, study_group_death, age_group) %>% unique(), by="subject_id") %>%
+  group_by(Taxa) %>%
+  summarize(nsig = sum(fdr<0.1)) %>%
+  ungroup() %>% 
+  arrange(-nsig) %>%
+  filter(nsig > 5) %>%
+  #slice(1:20) %>%
+  pull(Taxa)
+
+
+## Pick the taxa based on what we have showcased
+taxa_of_interest2 <- c("Bacillota Streptococcus mitis", "Pseudomonadota Haemophilus influenzae", "Bacillota Streptococcus lactarius", "Bacillota Streptococcus oralis", "Pseudomonadota Moraxella nonliquefaciens")
+```
+
+
+Fisher exact test on age groups
+
+```{r}
+## Fisher exact test on age groups
+summaries_df <- pfit_results_pvalues %>%
+  filter(sample_type %in% "Induced Sputum") %>%
+  filter(Taxa %in% taxa_of_interest) %>%
+  left_join(select(s_npop, subject_id, study_group_death, age_group) %>% unique(), by="subject_id") %>%
+  group_by(Taxa, age_group) %>%
+  summarize(nsig = sum(fdr<0.1)) %>%
+  ungroup() %>%
+  left_join(s_npop %>% filter(subject_id %in% unique(pfit_results_pvalues$subject_id)) %>% count(age_group, name = "total"), by="age_group") %>%
+  mutate(not_sig = total - nsig) %>%
+  #pivot_longer(cols=c("nsig", "not_sig"))
+  
+  nest_by(Taxa) %>%
+  mutate(model = list(fisher.test(as.matrix(data %>% select(nsig, not_sig))))) %>%
+  ungroup() %>%
+  group_by(Taxa) %>%
+  summarize(tidy(model[[1]])) %>%
+  ungroup() %>%
+  select(Taxa, p.value) %>%
+  mutate(fdr = p.adjust(p.value, method="BH"))
+
+summaries_df %>%
+  filter(fdr<0.1) %>%
+  kable_style()
+```
+
+Fisher exact test on severe vs very severe
+
+```{r}
+## Fisher exact test on severe vs very severe
+summaries_df <- pfit_results_pvalues %>%
+  filter(sample_type %in% "Induced Sputum") %>%
+  filter(Taxa %in% taxa_of_interest) %>%
+  left_join(select(s_npop, subject_id, study_group_death, age_group) %>% unique(), by="subject_id") %>%
+  group_by(Taxa, study_group_death) %>%
+  summarize(nsig = sum(fdr<0.1)) %>%
+  ungroup() %>%
+  left_join(s_npop %>% filter(subject_id %in% unique(pfit_results_pvalues$subject_id)) %>% count(study_group_death, name = "total"), by="study_group_death") %>%
+  mutate(not_sig = total - nsig) %>%
+  #pivot_longer(cols=c("nsig", "not_sig"))
+  
+  nest_by(Taxa) %>%
+  mutate(model = list(fisher.test(as.matrix(data %>% select(nsig, not_sig))))) %>%
+  ungroup() %>%
+  group_by(Taxa) %>%
+  summarize(tidy(model[[1]])) %>%
+  ungroup() %>%
+  select(Taxa, p.value) %>%
+  mutate(fdr = p.adjust(p.value, method="BH"))
+
+
+summaries_df %>%
+  filter(fdr<0.1) %>%
+  pander(split.table=Inf, digits=2)
+```
+
+
+Fisher exact test on taxa enriched in sputum
+
+```{r eval=F}
+## Fisher exact test on severe vs very severe
+summaries_df <- pfit_results_pvalues %>%
+  select(subject_id, sample_type, Taxa, fdr) %>%
+  pivot_wider(names_from="sample_type", values_from="fdr") %>%
+  mutate(enriched_in = case_when(
+    `Induced Sputum` < 0.1 ~ "Induced Sputum",
+    `NPOP VTM` < 0.1 ~ "NPOP",
+    TRUE ~ "None"
+  )) %>%
+  
+  filter(Taxa %in% taxa_of_interest) %>%
+  left_join(select(s_npop, subject_id, study_group_death, age_group) %>% unique(), by="subject_id") %>%
+  group_by(Taxa, enriched_in) %>%
+  summarize(nsig = sum(fdr<0.1)) %>%
+  ungroup() %>%
+  left_join(s_npop %>% filter(subject_id %in% unique(pfit_results_pvalues$subject_id)) %>% count(study_group_death, name = "total"), by="study_group_death") %>%
+  mutate(not_sig = total - nsig) %>%
+  #pivot_longer(cols=c("nsig", "not_sig"))
+  
+  nest_by(Taxa) %>%
+  mutate(model = list(fisher.test(as.matrix(data %>% select(nsig, not_sig))))) %>%
+  ungroup() %>%
+  group_by(Taxa) %>%
+  summarize(tidy(model[[1]])) %>%
+  ungroup() %>%
+  select(Taxa, p.value) %>%
+  mutate(fdr = p.adjust(p.value, method="BH"))
+
+
+summaries_df %>%
+  filter(fdr<0.1) %>%
+  pander(split.table=Inf, digits=2)
+```
+
+```{r}
+props_dirichlet <- summed_props %>%
+  as.data.frame() %>% 
+  rownames_to_column("Taxa") %>% 
+  pivot_longer(-Taxa, names_to="SampleID", values_to="props") %>%
+  
+  mutate(props = props + min(filter(., props>0)$props) / 5) %>%
+  
+  right_join(select(filter(s, subject_id %in% pfit_results_theta$subject_id), SampleID, subject_id, sample_type, study_group, age_group), by="SampleID")  %>%
+  left_join(select(s_npop, subject_id, study_group_death) %>% unique(), by="subject_id") %>%
+  select(-SampleID) %>%
+  pivot_wider(names_from="sample_type", values_from="props") %>%
+  
+  left_join(pfit_results_pvalues %>% group_by(subject_id, Taxa) %>% summarize(fdr = min(fdr)) %>% ungroup() , by=c("subject_id", "Taxa")) %>%
+  droplevels() 
+```
+
+
+
+```{r fig.width=12, fig.height=4}
+props_dirichlet %>%
+  filter(!is.na(fdr)) %>%
+  filter(Taxa %in% taxa_of_interest2) %>%
+  mutate(isSig = ifelse(fdr<0.1, "q<0.1", "q>0.1")) %>%
+  mutate(Taxa = fct_relabel(Taxa, function(x) sub("Pseudomonadota |Bacteroidota |Bacillota |Actinomycetota", "", x))) %>%
+  #mutate(Taxa = gsub(" ", "\n", Taxa)) %>%
+  ggplot(aes(x=`NPOP VTM`, y=`Induced Sputum`, color=study_group_death, shape=isSig, alpha=isSig)) +
+    geom_point() +
+    geom_abline(intercept = 0, slope = 1, linetype=2) +
+    scale_y_continuous(trans="log10", labels=scales:::percent) +
+    scale_x_continuous(trans="log10", labels=scales:::percent) +
+    scale_shape_manual(values=c(19,16)) +
+    scale_alpha_manual(values=c(1, 0.3)) +
+    scale_color_manual(values=ann_colors$study_group_death) +
+    facet_wrap(~Taxa, ncol=6) +
+    theme_clean() +
+    theme(
+      aspect.ratio = 1
+    ) +
+    labs(
+      color="", shape="", alpha=""
+    )
+
+#ggsave("perch_Fig2I_dirichlet.pdf", height=2.5, width=12, useDingbats=F)
+```
+
+
+
+
+
+
+# Supplemental Figure 4: Malnutrition
+
+## SuppFig 4A
+
+```{r}
+s_toTest <- s_npop %>%
+  filter(death == "No") %>%
+  droplevels()
+```
+
+```{r fig.height=6, fig.width=12}
+p2 <- predict(rf_model, testing_data)
+
+predict_df <- enframe(p2, name = "SampleID", value="MMI") %>%
+  left_join(select(s_toTest, SampleID, actual_age=age_months, study_group, study_group_collapse, study_group_collapse_control, age_group, malnutrition_baseline, malnutrition_baseline_all, current_abx), by="SampleID") %>%
+  bind_rows(training_df)
+
+mod2 = nls(MMI ~ SSlogis(actual_age, Asym, xmid, scal), data=predict_df %>% filter(study_group_collapse %in% "Pneumonia"))
+
+predict_df %>%
+  ggplot(mapping = aes(x=actual_age, y=MMI, color=interaction(malnutrition_baseline, study_group_collapse, sep = " "))) +
+  geom_point() +
+  #annotate(geom="text", x=0, y=40, label=paste("Logistic curve for pneumonia:\nHoriz. asymptote=", round(mod2$m$getPars()['Asym'],2), "\nxmid=", round(mod2$m$getPars()['xmid'],2), "\nscale=", round(mod2$m$getPars()['scal'],2)), hjust = 0) +
+  geom_smooth(
+    method = "nls", formula = y ~ SSlogis(x, Asym, xmid, scal),
+    se = FALSE
+  ) +
+  scale_color_brewer(palette = "Paired") +
+  theme_clean() +
+  theme(
+    #legend.position = "bottom"
+  ) +
+  coord_equal() +
+  labs(
+    y = "Predicted age",
+    x = "Actual age", color=""
+    #title = "Predicted age from microbiome abundances",
+    #subtitle = "Curves represents self-starting logistic model"
+  )
+ggsave("perch_SuppFig4A_maturation_index.pdf", height=3, width=6, useDingbats=F)
+```
+
+## SuppFig 4B
+
+```{r, fig.width=5, fig.height=3}
+
+# mod1 is the SSlogis model for Controls
+# mod2 is the SSlogis model for Pneumonia
+
+predict_df$curve_value <- predict(mod1, newdata = predict_df)
+
+predict_df <- predict_df %>%
+  mutate(RMMI = MMI - curve_value)
+
+#plot_df_25taxa <- plot_df
+```
+
+```{r}
+predict_df %>%
+  ggplot(aes(x = interaction(malnutrition_baseline, study_group_collapse, sep = '\n'), y = RMMI, color=actual_age)) +
+    geom_boxplot(outlier.alpha = 0) +
+    geom_quasirandom(aes(shape=current_abx)) +
+    #scale_y_continuous(limits=c(-26.5, 30)) +
+    scale_color_viridis() +
+    scale_shape_manual(values=c(16,10)) +
+    theme_clean() +
+    labs(
+      x="", color="Actual\nage", shape="Antibiotics"
+    )
+ggsave("perch_SuppFig4B_maturation_index.pdf", height=2.8, width=5, useDingbats=F)
+```
+
+RMMI ~ current_abx + malnutrition_baseline + study_group_collapse
+
+```{r}
+tidy(lm(RMMI ~ current_abx + malnutrition_baseline + study_group_collapse, data = predict_df))
+```
+
+
+For each study group: RMMI ~ current_abx + malnutrition_baseline
+```{r}
+predict_df %>%
+  group_by(study_group_collapse) %>%
+  do(tidy(lm(RMMI ~ current_abx + malnutrition_baseline, data = .))) %>%
+  ungroup() %>%
+  filter(!grepl("Intercept", term)) %>%
+  mutate(term = sub("malnutrition_baseline", "Normal - ", term)) %>%
+  kable_style()
+```
+
+
+RMMI ~ current_abx + malnutrition_baseline_all + study_group_collapse
+
+```{r}
+tidy(lm(RMMI ~ current_abx + malnutrition_baseline_all + study_group_collapse, data = predict_df))
+```
+
+## SuppFig 4B Differential abundance
+
+
+
+```{r}
+props_toTest <- props_toTest_npop %>%
+  filter(SampleID %in% s_toTest$SampleID) %>%
+  droplevels() 
+```
+
+
+For each age group: props_log ~ current_abx + study_group_collapse + malnutrition_baseline
+
+
+
+```{r}
+summaries_df <- props_toTest %>%
+  
+  group_by(Taxa, age_group) %>%
+  
+  # for regular linear models
+  do(tidy(lm(props_log ~ current_abx + study_group_collapse + malnutrition_baseline, data=.))) %>%
+  #do(tidy_lm_posthoc(lm(props_log ~ study_group, data=.), "study_group")) %>%
+  
+  # for linear mixed effects models
+  #do(tidy(nlme::lme(props_log ~ study_group, random=~1|subject_id, data=., na.action=na.omit), effect="fixed")) %>%
+  #do(tidy_lm_posthoc(nlme::lme(props_log ~ study_group, random=~1|subject_id, data=., na.action=na.omit), "study_group")) %>%
+
+  ungroup() %>%
+  
+  filter(!grepl("Intercept|Residuals", term)) %>%
+  mutate(term = sub("current_abxYes", "Abx", term)) %>%
+  mutate(term = sub("study_group_collapse", "Control - ", term)) %>%
+  mutate(term = sub("malnutrition_baseline", "Normal weight - ", term)) %>%
+  
+  group_by(term, age_group) %>%
+  mutate(fdr = p.adjust(p.value, method="BH")) %>%
+  ungroup()
+```
+
+```{r fig.width=10, fig.height=4}
+
+summaries_df %>%
+  
+  group_by(Taxa) %>%
+  mutate(num_sig = any(fdr<0.1)) %>%
+  ungroup() %>%
+  filter(num_sig) %>%
+  
+  mutate(Taxa = reorder(Taxa, estimate)) %>%
+  mutate(isSig = ifelse(p.value < 0.05, "p<0.05", "p>0.05")) %>%
+  mutate(isSig = ifelse(fdr < 0.1, "q<0.1", isSig)) %>%
+  
+  mutate(Taxa = fct_relabel(Taxa, function(x) sub("Pseudomonadota |Bacteroidota |Bacillota |Actinomycetota", "", x))) %>%
+  
+  ggplot(aes(x=estimate, y=Taxa, color=age_group, shape=isSig)) +
+    geom_vline(xintercept=0, linetype=2) +
+    geom_pointrange(aes(xmin=estimate-std.error, xmax=estimate+std.error), position = position_dodge(width = 0.5)) +
+    facet_wrap(~term, ncol=6) +
+    scale_shape_manual(values=c(8,1,16)) +
+    scale_color_manual(values=ann_colors$age_group) +
+    theme_clean() +
+    theme(
+      strip.text.y = element_text(angle = 0)
+    ) +
+    labs(
+      x="Log difference between groups",
+      y="", color="", shape=""
+    )
+#ggsave("perch_malnutrition_diff_ab2.pdf", height=6, width=1, useDingbats=F)
+```
+
+For each age group: props_log ~ current_abx + study_group_collapse + malnutrition_baseline
+
+The same test as above but for just the breastfeeding associated bacteria
+
+```{r}
+summaries_df <- props_toTest %>%
+  
+  # only test for the bacteria assocaited with breastfeeding
+  filter(Taxa %in% c("Bacillota Streptococcus lactarius", "Bacillota Streptococcus parasanguinis", "Bacillota Streptococcus thermophilus", "Bacillota Streptococcus vestibularis")) %>%
+  
+  group_by(Taxa, age_group) %>%
+  
+  # for regular linear models
+  do(tidy(lm(props_log ~ current_abx + study_group_collapse + malnutrition_baseline, data=.))) %>%
+  #do(tidy_lm_posthoc(lm(props_log ~ study_group, data=.), "study_group")) %>%
+  
+  # for linear mixed effects models
+  #do(tidy(nlme::lme(props_log ~ study_group, random=~1|subject_id, data=., na.action=na.omit), effect="fixed")) %>%
+  #do(tidy_lm_posthoc(nlme::lme(props_log ~ study_group, random=~1|subject_id, data=., na.action=na.omit), "study_group")) %>%
+
+  ungroup() %>%
+  
+  filter(!grepl("Intercept|Residuals", term)) %>%
+  mutate(term = sub("current_abxYes", "Abx", term)) %>%
+  mutate(term = sub("study_group_collapse", "Control - ", term)) %>%
+  mutate(term = sub("malnutrition_baseline", "Normal weight - ", term)) %>%
+  
+  group_by(term, age_group) %>%
+  mutate(fdr = p.adjust(p.value, method="BH")) %>%
+  ungroup()
+```
+
+
+```{r fig.width=8, fig.height=4}
+
+summaries_df %>%
+  
+  #group_by(Taxa) %>%
+  #mutate(num_sig = any(fdr<0.1)) %>%
+  #ungroup() %>%
+  #filter(num_sig) %>%
+  
+  mutate(Taxa = reorder(Taxa, estimate)) %>%
+  mutate(isSig = ifelse(p.value < 0.05, "p<0.05", "p>0.05")) %>%
+  #mutate(isSig = ifelse(fdr < 0.1, "q<0.1", isSig)) %>%
+  
+  mutate(Taxa = fct_relabel(Taxa, function(x) sub("Pseudomonadota |Bacteroidota |Bacillota |Actinomycetota", "", x))) %>%
+  
+  ggplot(aes(x=estimate, y=Taxa, color=age_group, shape=isSig)) +
+    geom_vline(xintercept=0, linetype=2) +
+    geom_pointrange(aes(xmin=estimate-std.error, xmax=estimate+std.error), position = position_dodge(width = 0.5)) +
+    facet_wrap(~term) +
+    scale_shape_manual(values=c(16,1)) +
+    scale_color_manual(values=ann_colors$age_group) +
+    theme_clean() +
+    theme(
+      strip.text.y = element_text(angle = 0)
+    ) +
+    labs(
+      x="Log difference between groups",
+      y="", color="", shape=""
+    )
+```
+
+
+```{r}
+props_toTest %>%
+  mutate(x = fct_relabel(age_group, function(x) gsub(" ", "\n", x))) %>%
+  # only test for the bacteria assocaited with breastfeeding
+  filter(Taxa %in% c("Bacillota Streptococcus lactarius", "Bacillota Streptococcus parasanguinis", "Bacillota Streptococcus thermophilus", "Bacillota Streptococcus vestibularis")) %>%
+  mutate(Taxa = sub("Bacillota ", "", Taxa)) %>%
+  ggplot(aes(x=x, y = props, color=age_group, shape=malnutrition_baseline)) +
+    geom_boxplot(outlier.alpha=0) +
+    geom_quasirandom(dodge.width=0.75) +
+    scale_color_manual(values=ann_colors$age_group) +
+    scale_shape_manual(values=c(17,2)) +
+    scale_y_continuous(trans="log10", labels=scales:::percent, limits=c(9e-9, 3)) +
+    facet_wrap(~Taxa, ncol=4) +
+    theme_clean() +
+    theme(
+      legend.position="bottom"
+    ) +
+    guides(color="none") +
+    labs(
+      x="", color="", shape="",
+      y="Relative abundance"
+    )
+ggsave("perch_SuppFig4C_bf_bacteria.pdf", height=3, width=8.7, useDingbats=F)
+```
+
+For each age group and study group: props_log ~ bf_current + study_group + malnutrition_baseline
+
+Not corrected for abx
+
+```{r}
+summaries_df <- props_toTest %>%
+  
+  group_by(Taxa, age_group, study_group_collapse) %>%
+  
+  # for regular linear models
+  do(tidy(lm(props_log ~  bf_current + study_group + malnutrition_baseline, data=.))) %>%
+  #do(tidy_lm_posthoc(lm(props_log ~ study_group, data=.), "study_group")) %>%
+  
+  # for linear mixed effects models
+  #do(tidy(nlme::lme(props_log ~ study_group, random=~1|subject_id, data=., na.action=na.omit), effect="fixed")) %>%
+  #do(tidy_lm_posthoc(nlme::lme(props_log ~ study_group, random=~1|subject_id, data=., na.action=na.omit), "study_group")) %>%
+
+  ungroup() %>%
+  
+  filter(!grepl("Intercept|Residuals", term)) %>%
+  mutate(term = sub("study_group_collapse", "Control - ", term)) %>%
+  mutate(term = sub("malnutrition_baseline", "Normal weight - ", term)) %>%
+  
+  group_by(term, age_group, study_group_collapse) %>%
+  mutate(fdr = p.adjust(p.value, method="BH")) %>%
+  ungroup()
+```
+
+
+```{r fig.width=10, fig.height=4}
+
+summaries_df %>%
+  
+  group_by(Taxa) %>%
+  mutate(num_sig = any(fdr<0.1)) %>%
+  ungroup() %>%
+  filter(num_sig) %>%
+  
+  mutate(Taxa = reorder(Taxa, estimate)) %>%
+  mutate(isSig = ifelse(p.value < 0.05, "p<0.05", "p>0.05")) %>%
+  mutate(isSig = ifelse(fdr < 0.1, "q<0.1", isSig)) %>%
+  
+  mutate(Taxa = fct_relabel(Taxa, function(x) sub("Pseudomonadota |Bacteroidota |Bacillota |Actinomycetota", "", x))) %>%
+  
+  ggplot(aes(x=estimate, y=Taxa, color=age_group, shape=isSig)) +
+    geom_vline(xintercept=0, linetype=2) +
+    geom_pointrange(aes(xmin=estimate-std.error, xmax=estimate+std.error), position = position_dodge(width = 0.5)) +
+    facet_wrap(~term + study_group_collapse, ncol=6) +
+    scale_shape_manual(values=c(8,1,16)) +
+    scale_color_manual(values=ann_colors$age_group) +
+    theme_clean() +
+    theme(
+      strip.text.y = element_text(angle = 0)
+    ) +
+    labs(
+      x="Log difference between groups",
+      y="", color="", shape=""
+    )
+#ggsave("perch_malnutrition_diff_ab2.pdf", height=6, width=1, useDingbats=F)
+```
+
+
+```{r}
+s_toTest %>%
+  filter(age_group %in% "12-23 months") %>%
+  count(bf_current, malnutrition_baseline, study_group_collapse) %>%
+  pander(split.table=Inf, digits=2)
+```
+
+
+
+# Figure 3: Childhood mortality
+
+```{r}
+s_toTest <- s_npop #%>%
+  #filter(study_group_death %in% c("Very severe case", "Death")) %>%
+  #droplevels()
+```
+
+
+
+## qPCR results 
+
+```{r fig.height=20, fig.width=20}
+qpcr <- read_delim("Data/perch_qpcr_all.txt") %>%
+  right_join(select(s_npop, ParticipantID, study_group_collapse_control, study_group_death, age_group), by="ParticipantID") %>%
+  mutate(test_group = ifelse(grepl("Ct value", bugs), "CT", "Copy number")) %>%
+  mutate(ct = ifelse(test_group%in% "CT" & ct==0, 40, ct))
+```
+
+```{r fig.height=15, fig.width=15}
+qpcr %>%
+  mutate(study_group_death = fct_relabel(study_group_death, function(x) gsub(" ", "\n", x))) %>%
+  mutate(bugs = str_wrap(bugs, width=20))  %>%
+  filter(test_group %in% "CT") %>%
+  ggplot(aes(x=study_group_death, y=ct, color=age_group)) +
+    geom_boxplot(outlier.alpha=0) +
+    geom_quasirandom(dodge.width=0.75) +
+    facet_wrap(~bugs, scales = "free") +
+    scale_color_manual(values=ann_colors$age_group) +
+    theme_clean() +
+    labs(
+      x="",
+      y="CT"
+    )
+ggsave("perch_qpcr_CT.pdf", height=15, width=15, useDingbats=F)
+
+```
+
+```{r fig.height=15, fig.width=15}
+
+qpcr %>%
+  mutate(study_group_death = fct_relabel(study_group_death, function(x) gsub(" ", "\n", x))) %>%
+  mutate(bugs = str_wrap(bugs, width=20))  %>%
+  filter(test_group %in% "Copy number") %>%
+  mutate(ct = ifelse(ct==0, 1, ct)) %>%
+  ggplot(aes(x=study_group_death, y=ct, color=age_group)) +
+    geom_boxplot(outlier.alpha=0) +
+    geom_quasirandom(dodge.width=0.75) +
+    facet_wrap(~bugs, scales = "free") +
+    scale_color_manual(values=ann_colors$age_group) +
+    scale_y_continuous(trans="log10") +
+    theme_clean() +
+    labs(
+      x="",
+      y="Copy number"
+    )
+ggsave("perch_qpcr_copy_number.pdf", height=15, width=15, useDingbats=F)
+```
+
+```{r eval=F}
+s_toTest %>%
+  left_join(props_toTest %>% 
+              #filter(Taxa %in% "Pseudomonadota Enterobacteriaceae") %>% 
+              filter(Taxa %in% "Pseudomonadota Haemophilus influenzae") %>% 
+              select(SampleID, Taxa, props),
+            by="SampleID") %>%
+  do(tidy(lm(props ~ study_group_death * Shannon, data=.))) %>%
+  mutate(term = sub("study_group_death", "Control - ", term)) %>%
+  pander(split.table=Inf, digits=2)
+
+
+
+s_toTest %>%
+  left_join(props_toTest %>% 
+              #filter(Taxa %in% "Pseudomonadota Enterobacteriaceae") %>% 
+              filter(Taxa %in% "Pseudomonadota Haemophilus influenzae") %>% 
+              select(SampleID, Taxa, props),
+            by="SampleID") %>%
+  group_by(study_group_death) %>%
+  do(tidy(lm(props ~ age_group + Shannon, data=.))) %>%
+  ungroup() %>%
+  filter(!grepl("Intercept", term)) %>%
+  #mutate(term = sub("study_group_death", "Control - ", term)) %>%
+  pander(split.table=Inf, digits=2)
+```
+
+
+## Fig 3A Alpha diversity
+
+
+```{r fig.width=8}
+s_toTest %>%
+  ggplot(aes(x=Shannon, fill=study_group_death)) +
+    geom_density(alpha=0.9) +
+    facet_wrap(~age_group, ncol=4) +
+    scale_fill_manual(values=ann_colors$study_group_death) +
+    #scale_alpha_manual(values=c(0.4,0.9)) +
+    theme_clean() +
+    theme(aspect.ratio = 1.25) +
+    guides(alpha="none") +
+    labs(
+      y="", fill="",
+      x="Shannon diversity"
+    )
+ggsave("perch_Fig3A_alpha.pdf", height=3.3, width=8, useDingbats=F)
+```
+
+
+For each age group: alpha ~ current_abx + study_group_death with the subjects who died as the reference
+
+```{r}
+summaries_df <- s_toTest %>%
+  
+  mutate(study_group_death = fct_relevel(study_group_death, "Death", after=0)) %>%
+  
+  group_by(age_group) %>%
+  
+  # for regular linear models
+  do(tidy(lm(Shannon ~ current_abx + study_group_death, data=.))) %>%
+  #do(tidy_lm_posthoc(lm(alpha ~ study_group_collapse_control, data=.), "study_group_collapse_control")) %>%
+  
+  # for linear mixed effects models
+  #do(tidy(nlme::lme(alpha ~ study_group, random=~1|subject_id, data=., na.action=na.omit), effect="fixed")) %>%
+  #do(tidy_lm_posthoc(nlme::lme(alpha ~ study_group, random=~1|subject_id, data=., na.action=na.omit), "study_group")) %>%
+  
+  ungroup() %>%
+  
+  filter(!grepl("Intercept|Residuals", term)) %>%
+  mutate(term = sub("study_group_death", "Death - ", term)) %>%
+  #mutate(term = sub("age_group", "0-5 months - ", term)) %>%
+  
+  group_by(term) %>%
+  mutate(fdr = p.adjust(p.value, method="BH")) %>%
+  ungroup()
+
+summaries_df %>%
+  kable_style(fdr, 0.1)
+```
+
+
+
+
+
+## Fig 3B Dysbiosis score
+
+
+
+```{r fig.height=4, fig.width=8}
+s_toTest %>%
+  ggplot(aes(x=median_dysbiosis, fill=study_group_death)) +
+    geom_density(alpha=0.9) +
+    scale_fill_manual(values=ann_colors$study_group_death) +
+    #scale_alpha_manual(values=c(0.4,0.9)) +
+    #scale_y_continuous(limits=c(.45, 1.05)) +
+    facet_wrap(~age_group, ncol=4) +
+    theme_clean() +
+    theme(
+      aspect.ratio = 1.25
+      #axis.text.x=element_text(angle=90, hjust=1, vjust=0.5),
+      #legend.position = "bottom"
+    ) +
+    guides(alpha="none") +
+    labs(
+      y="", fill="",
+      x="Dysbiosis score"
+    )
+ggsave("perch_Fig3B_dysbiosis.pdf", height=3.3, width=7.9, useDingbats=F)
+```
+
+
+For each age group: median_dysbiosis ~ current_abx + study_group_death where subjects who died is the reference group
+
+```{r}
+summaries_df <- s_toTest %>%
+  
+  mutate(study_group_death = fct_relevel(study_group_death, "Death", after=0)) %>%
+  
+  group_by(age_group) %>%
+  
+  # for regular linear models
+  do(tidy(lm(median_dysbiosis ~ current_abx + study_group_death, data=.))) %>%
+  #do(tidy_lm_posthoc(lm(alpha ~ study_group_collapse_control, data=.), "study_group_collapse_control")) %>%
+  
+  # for linear mixed effects models
+  #do(tidy(nlme::lme(alpha ~ study_group, random=~1|subject_id, data=., na.action=na.omit), effect="fixed")) %>%
+  #do(tidy_lm_posthoc(nlme::lme(alpha ~ study_group, random=~1|subject_id, data=., na.action=na.omit), "study_group")) %>%
+  
+  ungroup() %>%
+  
+  filter(!grepl("Intercept|Residuals", term)) %>%
+  mutate(term = sub("study_group_death", "Death - ", term))  %>%
+  
+  group_by(term) %>%
+  mutate(fdr = p.adjust(p.value, method="BH")) %>%
+  ungroup()
+
+summaries_df %>%
+  kable_style()
+```
+
+
+
+
+
+## Fig 3C Beta diversity
+
+```{r fig.height=4, fig.width=8}
+pc_df <- s_toTest %>%
+  pcoaplus(bc) 
+
+centroids <- pc_df %>%
+  group_by(age_group, study_group_death, isDeath) %>%
+  summarize(Axis.1=mean(Axis.1), Axis.2=mean(Axis.2)) %>%
+  ungroup()
+  
+pc_df %>%
+  
+  ggplot(aes(x=Axis.1, y=Axis.2, color=study_group_death, shape=current_abx)) +
+    geom_point(alpha=0.5) +
+    #stat_ellipse(aes(linetype=isDeath)) +
+    geom_point(data=centroids, shape=21, stroke=1, size=2.5, color="black", aes(fill=study_group_death)) +
+    scale_color_manual(values=ann_colors$study_group_death) +
+    scale_fill_manual(values=ann_colors$study_group_death) +
+    scale_alpha_manual(values=c(0.4,0.9)) +
+    scale_shape_manual(values=c(16,10)) +
+    facet_wrap(~age_group, ncol=4) +
+    theme_clean_pcoa() + 
+    labs(
+      x=attr(pc_df, "axislabel")[1],
+      y=attr(pc_df, "axislabel")[2],
+      color="", shape="Antibiotics", fill="")
+
+ggsave("perch_Fig3C_pcoa_death_by_age.pdf", height=2, width=10, useDingbats=F)
+```
+
+
+
+
+For each age group: distmat ~ current_abx + study_group_death
+
+```{r eval=T}
+summaries_df <- s_toTest %>%
+  group_by(age_group) %>%
+  do(adonispost(
+    ., distmat = bc, formula = distmat ~ current_abx + study_group_death,
+    sample_id_var = SampleID, permutations=999, which = study_group_death, alpha = 1)) %>%
+  ungroup() %>%
+  
+  filter(!term %in% c("Residual", "Total")) %>%
+  select(-one_of(c("sumsq"))) %>%
+  filter(grepl("Death", comparison))
+
+# If you don't need the shuffling functionality, you can use
+# summaries_df <- adonisplus(s_toTest, wu, distmat ~ study_group)
+# If you would like to test pairs of groups, use adonispost
+
+summaries_df %>%
+  select(-term)%>%
+  kable_style()
+```
+
+
+## Fig 3D KEGG beta diversity
+
+```{r fig.height=4, fig.width=8}
+pc_df <- s_toTest %>%
+  pcoaplus(bc_kegg) 
+
+centroids <- pc_df %>%
+  group_by(age_group, study_group_death, isDeath) %>%
+  summarize(Axis.1=mean(Axis.1), Axis.2=mean(Axis.2)) %>%
+  ungroup()
+  
+pc_df %>%
+  
+  ggplot(aes(x=Axis.1, y=Axis.2, color=study_group_death, shape=current_abx)) +
+    geom_point(alpha=0.5) +
+    #stat_ellipse(aes(linetype=isDeath)) +
+    geom_point(data=centroids, shape=21, stroke=1, size=2.5, color="black", aes(fill=study_group_death)) +
+    scale_color_manual(values=ann_colors$study_group_death) +
+    scale_fill_manual(values=ann_colors$study_group_death) +
+    scale_alpha_manual(values=c(0.4,0.9)) +
+    scale_shape_manual(values=c(16,10)) +
+    facet_wrap(~age_group, ncol=4) +
+    theme_clean_pcoa() + 
+    guides(alpha="none") +
+    labs(
+      x=attr(pc_df, "axislabel")[1],
+      y=attr(pc_df, "axislabel")[2],
+      color="", shape="Antibiotics", fill="")
+
+ggsave("perch_Fig3D_pcoa_death_by_age.pdf", height=2, width=10, useDingbats=F)
+```
+
+For each age group: distmat ~ current_abx + study_group_death
+
+```{r eval=T}
+summaries_df <- s_toTest %>%
+  group_by(age_group) %>%
+  do(adonispost(
+    ., distmat = bc_kegg, formula = distmat ~ current_abx + study_group_death,
+    sample_id_var = SampleID, permutations=999, which = study_group_death, alpha = 1)) %>%
+  ungroup() %>%
+  
+  filter(!term %in% c("Residual", "Total")) %>%
+  select(-one_of(c("sumsq"))) %>%
+  filter(grepl("Death", comparison)) %>%
+  
+  group_by(term) %>%
+  mutate(fdr = p.adjust(p.value, method="BH")) %>%
+  ungroup()
+
+# If you don't need the shuffling functionality, you can use
+# summaries_df <- adonisplus(s_toTest, wu, distmat ~ study_group)
+# If you would like to test pairs of groups, use adonispost
+
+summaries_df %>%
+  select(-term)%>%
+  kable_style()
+```
+
+
+
+
+
+
+## Fig 3E Differential abundance
+
+```{r}
+props_toTest <- props_toTest_npop #%>%
+  #filter(study_group_death %in% c("Very severe case", "Death")) %>%
+  #droplevels()
+```
+
+
+For each age group: props_log ~ current_abx + study_group_death where subjects who died is the reference group in the comparisons.
+
+
+```{r}
+summaries_df <- props_toTest %>%
+  
+  mutate(study_group_death = fct_relevel(study_group_death, "Death", after=0)) %>%
+  group_by(Taxa, age_group) %>%
+  
+  # for regular linear models
+  do(tidy(lm(props_log ~ current_abx + study_group_death, data=.))) %>%
+  #do(tidy_lm_posthoc(lm(props_log ~ study_group, data=.), "study_group")) %>%
+  
+  # for linear mixed effects models
+  #do(tidy(nlme::lme(props_log ~ study_group, random=~1|subject_id, data=., na.action=na.omit), effect="fixed")) %>%
+  #do(tidy_lm_posthoc(nlme::lme(props_log ~ study_group, random=~1|subject_id, data=., na.action=na.omit), "study_group")) %>%
+
+  ungroup() %>%
+  
+  filter(!grepl("Intercept|Residuals", term)) %>%
+  mutate(term = sub("study_group_collapse", "Control - ", term)) %>%
+  mutate(term = sub("age_group", "0-5 months - ", term)) %>%
+  mutate(term = sub("current_abxYes", "Abx", term)) %>%
+  
+  group_by(term) %>%
+  mutate(fdr = p.adjust(p.value, method="BH")) %>%
+  ungroup()
+```
+
+
+
+```{r fig.width=12, fig.height=4, eval=F}
+
+summaries_df %>%
+  mutate(estimate = -estimate) %>%
+  group_by(Taxa) %>%
+  mutate(num_sig = any(fdr<0.1)) %>%
+  ungroup() %>%
+  filter(num_sig) %>%
+  
+  #mutate(Taxa = reorder(Taxa, estimate)) %>%
+  mutate(Taxa = fct_reorder(Taxa, estimate, .fun = `[`, 4)) %>%
+  mutate(isSig = ifelse(fdr < 0.1, "q<0.1", "q>0.1")) %>%
+  
+  mutate(Taxa = fct_relabel(Taxa, function(x) sub("Pseudomonadota |Bacteroidota |Bacillota |Actinomycetota", "", x))) %>%
+  mutate(term = tolower(term)) %>%
+  mutate(term = sub("study_group_death", "Compared to ", term)) %>%
+  ggplot(aes(x=estimate, y=Taxa, color=age_group, shape=isSig, alpha=isSig)) +
+    geom_vline(xintercept=0, linetype=2) +
+    geom_pointrange(aes(xmin=estimate-std.error, xmax=estimate+std.error), position = position_dodge(width = 0.5)) +
+    scale_shape_manual(values=c(16,1)) +
+    scale_alpha_manual(values=c(1, 0.4)) +
+    scale_color_manual(values=ann_colors$age_group) +
+    facet_wrap(~term, ncol=4) +
+    theme_clean() +
+    theme(
+      strip.text.y = element_text(angle = 0),
+      legend.position = "bottom"
+    ) +
+    labs(
+      x="Log difference between groups",
+      y="", color="", shape="", alpha="",
+    )
+ggsave("perch_Fig3E_diffAb.pdf", height=5, width=4.2, useDingbats=F)
+```
+
+
+```{r fig.width=12, fig.height=4}
+
+summaries_df %>%
+  filter(!grepl("Abx", term)) %>%
+  mutate(estimate = -estimate) %>%
+  group_by(Taxa) %>%
+  mutate(num_sig = any(fdr<0.1)) %>%
+  ungroup() %>%
+  filter(num_sig) %>%
+  
+  #mutate(Taxa = reorder(Taxa, estimate)) %>%
+  mutate(Taxa = fct_reorder(Taxa, estimate, .fun = `[`, 12)) %>%
+  mutate(isSig = ifelse(fdr < 0.1, "q<0.1", "q>0.1")) %>%
+  
+  mutate(Taxa = fct_relabel(Taxa, function(x) sub("Pseudomonadota |Bacteroidota |Bacillota |Actinomycetota", "", x))) %>%
+  #mutate(term = tolower(term)) %>%
+  mutate(term = sub("study_group_death", "", term)) %>%
+  ggplot(aes(x=estimate, y=Taxa, color=term, shape=isSig, alpha=isSig)) +
+    geom_vline(xintercept=0, linetype=2) +
+    geom_pointrange(aes(xmin=estimate-std.error, xmax=estimate+std.error), position = position_dodge(width = 0.5)) +
+    scale_shape_manual(values=c(16,1)) +
+    scale_alpha_manual(values=c(1, 0.4)) +
+    scale_color_manual(values=ann_colors$study_group_death) +
+    facet_wrap(~age_group, ncol=4) +
+    theme_clean() +
+    theme(
+      strip.text.y = element_text(angle = 0),
+      legend.position = "bottom"
+    ) +
+    labs(
+      x="Log difference between groups",
+      y="", color="", shape="", alpha="",
+    )
+ggsave("perch_Fig3E_diffAb.pdf", height=5, width=8, useDingbats=F)
+```
+
+
+## Fig 4F Focus on differential abundance
+
+```{r fig.height=8, fig.width=8}
+taxa_toPlot <- summaries_df %>%
+  filter(estimate<0) %>%
+  filter(fdr<0.1) %>%
+  group_by(Taxa) %>%
+  mutate(nums = n()) %>%
+  ungroup() %>%
+  filter(nums>1) %>%
+  pull(Taxa) %>%
+  as.character() %>%
+  unique()
+
+taxa_toPlot <- c("Pseudomonadota Haemophilus influenzae", "Pseudomonadota Enterobacteriaceae", "Bacillota Staphylococcus epidermidis", "Bacillota Limosilactobacillus fermentum")
+
+props_toTest %>%
+  
+  filter(Taxa %in% taxa_toPlot) %>%
+  mutate(Taxa = fct_relabel(Taxa, function(x) sub("Pseudomonadota |Bacillota ", "", x))) %>%
+  
+  mutate(Taxa = fct_relabel(Taxa, function(x) gsub(" ", "\n", x))) %>%
+  mutate(age_groups = fct_relabel(age_group, function(x) gsub(" ", "\n", x))) %>%
+  ggplot(aes(x=props, fill=study_group_death, alpha=isDeath)) +
+    geom_density() +
+    scale_fill_manual(values=ann_colors$study_group_death) +
+    facet_grid(Taxa~age_group, scales="free") +
+    #scale_shape_manual(values=c(17,2)) +
+    scale_x_continuous(labels=scales:::percent, trans="log10") +
+    scale_alpha_manual(values=c(0.4,0.9)) +
+    theme_clean() +
+    theme(
+      strip.text.y=element_text(angle=0),
+      axis.text.x=element_text(angle=90, hjust=1, vjust=0.5),
+      legend.position = "bottom",
+      aspect.ratio = 1
+    ) +
+    guides(alpha="none") +
+    labs(
+      x="", fill="", shape="",
+      y="Relative abundance"
+    )
+ggsave("perch_Fig3F_select_taxa.pdf", height=5.5, width=8, useDingbats=F)
+```
+
+
+
+
+## Most abundant taxon analysis
+
+```{r}
+s_toTest %>%
+  mutate(topTaxa_coded = fct_lump(topGenus, prop=0.007)) %>%
+  
+  ggplot(aes(x=study_group_death, fill=topTaxa_coded)) +
+    geom_bar() +
+    facet_wrap(~age_group) +
+    scale_fill_brewer(palette="Paired") +
+    theme_clean()
+```
+
+
+```{r}
+s_toTest %>%
+  mutate(topTaxa_coded = fct_lump(topGenus, prop=0.007)) %>%
+  
+  group_by(age_group, study_group_death, topTaxa_coded) %>%
+  summarize(count = n()) %>%
+  ungroup() %>%
+  
+  group_by(age_group, study_group_death) %>%
+  mutate(total = sum(count)) %>%
+  ungroup() %>%
+  
+  mutate(percentage = count / total) %>%
+  
+  ggplot(aes(x=study_group_death, y=percentage, fill=topTaxa_coded)) +
+    geom_bar(stat="identity") +
+    facet_wrap(~age_group) +
+    scale_fill_brewer(palette="Paired") +
+    theme_clean() +
+    labs(
+      y="Percentage of samples",
+      fill="Dominant\ntaxon"
+    )
+```
+
+
+
+
+## Fig 3G VfDB
+
+```{r}
+genes_toTest <- vfdb %>%
+  #filter(geneID %in% h_flu_vfdb) %>%
+  
+  right_join(s_toTest, by="SampleID") %>%
+  
+  group_by(geneID) %>%
+  mutate(perc_present = mean(props > 0)) %>%
+  mutate(mean_prop = mean(props)) %>%
+  #summarize(perc_present = mean(props > 0), mean_prop = mean(props)) %>%
+  ungroup() %>%
+  filter(perc_present > 0.5) %>%
+  droplevels() %>%
+  
+  mutate(props_original = props) %>%
+  mutate(props = props + min(filter(., props>0)$props) / 10) %>%
+  mutate(props_log = log10(props))
+```
+
+For each age group: props_log ~ current_abx + study_group_death
+
+```{r}
+summaries_df <- genes_toTest %>%
+  
+  mutate(study_group_death = fct_relevel(study_group_death, "Death", after=0)) %>%
+  group_by(geneID, age_group) %>%
+  
+  # for regular linear models
+  do(tidy(lm(props_log ~ current_abx + study_group_death, data=.))) %>%
+  #do(tidy_lm_posthoc(lm(props_log ~ study_group_death, data=.), "study_group_death")) %>%
+  
+  # for linear mixed effects models
+  #do(tidy(nlme::lme(props_log ~ study_group, random=~1|subject_id, data=., na.action=na.omit), effect="fixed")) %>%
+  #do(tidy_lm_posthoc(nlme::lme(props_log ~ study_group, random=~1|subject_id, data=., na.action=na.omit), "study_group")) %>%
+
+  ungroup() %>%
+  
+  filter(!grepl("Intercept|Residuals", term)) %>%
+  #mutate(term = sub("study_group", "Control - ", term)) %>%
+  mutate(term = sub("age_group", "0-5 months - ", term)) %>%
+  mutate(term = sub("current_abxYes", "Abx", term)) %>%
+  
+  group_by(term, age_group) %>%
+  mutate(fdr = p.adjust(p.value, method="BH")) %>%
+  ungroup()
+
+#summaries_df %>%
+#  filter(p.value < 0.05) %>%
+#  kable_style(fdr, 0.1) %>%
+#  column_spec(c(1,3), width = "13em")
+```
+
+
+```{r fig.width=8, fig.height=8}
+hflu <- summaries_df %>%
+  filter(!grepl("Abx", term)) %>%
+  mutate(estimate = -estimate) %>%
+  group_by(geneID) %>%
+  summarize(num_sig = any(fdr<0.1 & estimate>0)) %>%
+  ungroup() %>%
+  filter(num_sig) %>%
+  pull(geneID)
+
+
+genes_of_interest <- summaries_df %>%
+  filter(term %in% "study_group_deathSevere case") %>%
+  mutate(estimate = -estimate) %>%
+  arrange(-estimate) %>%
+  slice(1:20) %>%
+  pull(geneID)
+
+summaries_df %>%
+  filter(!grepl("Abx", term)) %>%
+  mutate(estimate = -estimate) %>%
+  
+  #group_by(geneID) %>%
+  #mutate(num_sig = any(fdr<0.01 & estimate>0.5)) %>%
+  #ungroup() %>%
+  #filter(num_sig) %>%
+  filter(geneID %in% genes_of_interest) %>%
+  
+  mutate(geneID = fct_reorder(geneID, estimate, .fun = `[`, 11)) %>%
+  mutate(isSig = ifelse(fdr < 0.1, "q<0.1", "q>0.1")) %>%
+  
+  mutate(term = sub("study_group_death", "", term)) %>%
+  ggplot(aes(x=estimate, y=geneID, color=term, shape=isSig, alpha=isSig)) +
+    geom_vline(xintercept=0, linetype=2) +
+    geom_pointrange(aes(xmin=estimate-std.error, xmax=estimate+std.error), position = position_dodge(width = 0.5)) +
+    scale_shape_manual(values=c(16,1)) +
+    scale_alpha_manual(values=c(1, 0.4)) +
+    scale_color_manual(values=ann_colors$study_group_collapse_control) +
+    facet_wrap(~age_group, ncol=4) +
+    theme_clean() +
+    theme(
+      strip.text.y = element_text(angle = 0),
+      legend.position = "bottom"
+    ) +
+    labs(
+      x="Log difference between groups",
+      y="", color="", shape="", alpha="",
+    )
+ggsave("perch_Fig3G_vfdb_main.pdf", height=5, width=8, useDingbats=F)
+```
+
+
+```{r fig.height=6, fig.width=8}
+hflu <- summaries_df %>%
+  mutate(estimate = -estimate) %>%
+  group_by(geneID) %>%
+  summarize(num_sig = any(fdr<0.01 & estimate>0)) %>%
+  ungroup() %>%
+  filter(num_sig) %>%
+  pull(geneID)
+
+summaries_df %>%
+  mutate(estimate = -estimate) %>%
+  group_by(geneID) %>%
+  mutate(num_sig = any(fdr<0.01 & estimate>0)) %>%
+  ungroup() %>%
+  filter(num_sig) %>%
+  
+  mutate(geneID = fct_reorder(geneID, estimate, .fun = `[`, 11)) %>%
+  mutate(isSig = ifelse(fdr < 0.1, "q<0.1", "q>0.1")) %>%
+  
+  mutate(term = sub("study_group_death", "", term)) %>%
+  mutate(term = gsub(" ", "\n", term)) %>%
+  
+  mutate(significance = p_stars(fdr)) %>%
+  mutate(sig_color = ifelse(estimate > 2, "A", "B")) %>%
+  
+  ggplot(aes(x=term, y=geneID, fill=estimate)) +
+    geom_tile() +
+    geom_text(aes(label=significance, color=sig_color), size=2.5) +
+    facet_wrap(~age_group, ncol=4) +
+    scale_fill_gradient2(high = "#B4654A", mid="#E8E8E8", low="#3A506B") + 
+    scale_color_manual(values=c("gray90", "gray10")) +
+    theme_clean() +
+    #coord_equal() +
+    theme(
+      #aspect.ratio=1
+    ) +
+    guides(color="none") +
+    labs(
+      x="", y="",
+      fill="Mean\nlog\ndifference"
+    )
+#ggsave("perch_Fig4G_vfdb_main2.pdf", height=5, width=8, useDingbats=F)
+```
+
+
+```{r fig.height=6, fig.width=8}
+genes_toTest %>%
+  
+  filter(geneID %in% c("hemR", "hxuA", "hxuB", "hxuC")) %>%
+  
+  mutate(age_groups = fct_relabel(age_group, function(x) gsub(" ", "\n", x))) %>%
+  ggplot(aes(x=age_groups, y=props, color=study_group_death)) +
+    geom_boxplot(outlier.alpha=0) +
+    geom_quasirandom(dodge.width=0.75, aes(shape=current_abx, group=study_group_death)) +
+    facet_wrap(~geneID, ncol = 2) +
+    scale_color_manual(values=ann_colors$study_group_death) +
+    scale_shape_manual(values=c(16,10)) +
+    scale_y_continuous(labels=scales:::percent, trans="log10", limits=c(4e-9, 0.008)) +
+    theme_clean() +
+    theme(
+      #axis.text.x=element_text(angle=90, hjust=1, vjust=0.5),
+      legend.position = "bottom",
+      aspect.ratio = 0.75
+    ) +
+    #guides(color="none") +
+    labs(
+      x="", color="", shape="Antibiotics",
+      y="Relative abundance"
+    )
+ggsave("perch_Fig3H_vfdb.pdf", height=5, width=6, useDingbats=F)
+```
+
+
+```{r fig.height=6, fig.width=8}
+genes_toTest %>%
+  
+  filter(geneID %in% c("hemR", "hxuA", "hxuB", "hxuC")) %>%
+  
+  mutate(age_groups = fct_relabel(age_group, function(x) gsub(" ", "\n", x))) %>%
+  ggplot(aes(x=props, fill=study_group_death, alpha=isDeath)) +
+    geom_density() +
+    scale_fill_manual(values=ann_colors$study_group_death) +
+    facet_grid(geneID~age_group, scales="free") +
+    #scale_shape_manual(values=c(17,2)) +
+    scale_x_continuous(labels=scales:::percent, trans="log10") +
+    scale_alpha_manual(values=c(0.4,0.9)) +
+    theme_clean() +
+    theme(
+      strip.text.y=element_text(angle=0),
+      axis.text.x=element_text(angle=90, hjust=1, vjust=0.5),
+      legend.position = "bottom",
+      aspect.ratio = 1
+    ) +
+    guides(alpha="none") +
+    labs(
+      x="", fill="", shape="",
+      y="Relative abundance"
+    )
+ggsave("perch_Fig4H_vfdb2.pdf", height=5.5, width=8, useDingbats=F)
+```
+
+
+
+
+## Dirichlet
+
+```{r eval=F}
+
+pfit_results2 <- counts %>%
+  as.data.frame() %>% 
+  rownames_to_column("Taxid") %>% 
+  pivot_longer(-Taxid, names_to="SampleID", values_to="counts") %>%
+  right_join(select(filter(s, death %in% "Yes"), SampleID, subject_id, sample_type), by="SampleID")  %>%
+  right_join(enframe(a, name = "Taxid", value="Taxa"), by="Taxid") %>%
+  select(-Taxid) %>%
+  select(-SampleID) %>%
+  
+  #mutate(Taxa = fct_other(Taxa, keep=unique(props_pairwise$Taxa))) %>%
+  #group_by(Taxa, subject_id, sample_type) %>%
+  #summarize(counts = sum(counts)) %>%
+  #ungroup() %>%
+  
+  pivot_wider(names_from="sample_type", values_from="counts") %>%
+  filter(!is.na(`Induced Sputum`) & !is.na(`NPOP VTM`)) %>%
+  
+  nest_by(subject_id) %>%
+  mutate(model = list(pfit(t(matrix.please(data))))) %>%
+  ungroup()
+saveRDS(pfit_results2, "perch_pfit_results_death.rds")
+```
+
+
+```{r eval=F}
+pfit_results_pvalues <- pfit_results2 %>%
+  group_by(subject_id) %>%
+  summarize(feature_enrichment(model[[1]])) %>%
+  ungroup() %>%
+  #View() #%>%
+  #filter(observation == "counts.x") %>%
+  #select(-observation) %>%
+  mutate(p.value = ifelse(p.value<0, 0, p.value))
+write.table(pfit_results_pvalues, file="perch_pfit_results_pvalues_death.txt", sep='\t', row.names=F, quote=F)
+
+pfit_results_theta <- pfit_results2 %>%
+  group_by(subject_id) %>%
+  summarize(theta = model[[1]]$theta) %>%
+  ungroup()
+write.table(pfit_results_theta, file="perch_pfit_results_theta_death.txt", sep='\t', row.names=F, quote=F)
+```
+
+
+
+```{r}
+pfit_results_pvalues <- bind_rows(
+  read_delim("perch_pfit_results_pvalues.txt", show_col_types = FALSE),
+  read_delim("perch_pfit_results_pvalues_death.txt", show_col_types = FALSE)
+  ) %>%
+  rename(Taxa=feature, sample_type=observation) %>%
+  filter(sample_type %in% c("Induced Sputum")) %>%
+  #group_by(sample_type) %>%
+  mutate(fdr = p.adjust(p.value, method="BH")) #%>%
+  #ungroup()
+```
+
+```{r}
+pfit_results_theta <-bind_rows(
+  read_delim("perch_pfit_results_theta.txt", show_col_types = FALSE),
+  read_delim("perch_pfit_results_theta_death.txt", show_col_types = FALSE)
+)
+```
+
+```{r}
+taxa_of_interest <- pfit_results_pvalues %>%
+  left_join(select(s_npop, subject_id, study_group_death, age_group) %>% unique(), by="subject_id") %>%
+  group_by(Taxa) %>%
+  summarize(nsig = sum(fdr<0.1)) %>%
+  ungroup() %>% 
+  arrange(-nsig) %>%
+  slice(1:20) %>%
+  pull(Taxa)
+```
+
+
+```{r eval=F}
+pfit_results_pvalues %>%
+  left_join(select(s_npop, subject_id, study_group_death, age_group) %>% unique(), by="subject_id") %>%
+  group_by(Taxa,study_group_death) %>%
+  summarize(nsig = sum(fdr<0.1)) %>%
+  ungroup() %>% 
+  arrange(-nsig) %>%
+  #slice(1:20) %>%
+  #pull(Taxa)
+  View()
+```
+
+
+```{r}
+props_dirichlet <- summed_props %>%
+  as.data.frame() %>% 
+  rownames_to_column("Taxa") %>% 
+  pivot_longer(-Taxa, names_to="SampleID", values_to="props") %>%
+  
+  mutate(props = props + min(filter(., props>0)$props) / 5) %>%
+  
+  right_join(select(filter(s, subject_id %in% pfit_results_theta$subject_id), SampleID, subject_id, sample_type, study_group, age_group), by="SampleID")  %>%
+  left_join(select(s_npop, subject_id, study_group_death) %>% unique(), by="subject_id") %>%
+  select(-SampleID) %>%
+  pivot_wider(names_from="sample_type", values_from="props") %>%
+  
+  left_join(select(pfit_results_pvalues, -sample_type), by=c("subject_id", "Taxa")) %>%
+  droplevels() #%>%
+  
+  #mutate(props_original = props) %>%
+  
+  #mutate(props_log = log10(props))
+
+```
+
+
+```{r}
+props_dirichlet %>%
+  filter(subject_id %in% c("p_m00001", "p_m00007", "p_m00032", "p_m00033", "p_m00039", 
+"p_m00029", "p_m00049", "p_m00059", "p_m00129", "p_m00223", "p_m00046", 
+"p_m00123", "p_m00136", "p_m00170", "p_m00266", "p_m00094", "p_m00159", 
+"p_m00187", "p_m00351", "p_m00464")) %>%
+  mutate(isSig = ifelse(fdr<0.1, "q<0.1", "q>0.1")) %>%
+  mutate(Taxa = gsub(" ", "\n", Taxa)) %>%
+  ggplot(aes(x=`NPOP VTM`, y=`Induced Sputum`, color=study_group_death, shape=isSig, alpha=isSig)) +
+    geom_point() +
+    geom_abline(intercept = 0, slope = 1, linetype=2) +
+    scale_y_continuous(trans="log10") +
+    scale_x_continuous(trans="log10") +
+    scale_shape_manual(values=c(8,16)) +
+    scale_alpha_manual(values=c(1, 0.4)) +
+    facet_wrap(~subject_id) +
+    theme_clean()
+```
+
+
+
+
+```{r fig.width=15, fig.height=15}
+props_dirichlet %>%
+  filter(!is.na(fdr)) %>%
+  filter(Taxa %in% taxa_of_interest) %>%
+  mutate(isSig = ifelse(fdr<0.1, "q<0.1", "q>0.1")) %>%
+  mutate(Taxa = gsub(" ", "\n", Taxa)) %>%
+  ggplot(aes(x=`NPOP VTM`, y=`Induced Sputum`, color=age_group, shape=isSig, alpha=isSig)) +
+    geom_point() +
+    geom_abline(intercept = 0, slope = 1, linetype=2) +
+    scale_y_continuous(trans="log10", labels=scales:::percent) +
+    scale_x_continuous(trans="log10", labels=scales:::percent) +
+    scale_shape_manual(values=c(8,16)) +
+    scale_alpha_manual(values=c(1, 0.3)) +
+    scale_color_manual(values=ann_colors$age_group) +
+    facet_wrap(~Taxa) +
+    theme_clean() +
+    theme(
+      aspect.ratio = 1
+    ) +
+    labs(
+      color="", shape="", alpha=""
+    )
+
+ggsave("perch_dirichlet_top20_sputum_enriched_age.pdf", height=12, width=12, useDingbats=F)
+```
+
+
+# Figure 4: Antibody
+
+```{r}
+s_toTest <- s_npop
+```
+
+
+```{r}
+## sanity checks
+checks <- antibody %>%
+  select(Sample, subject_id, age_group, study_group) %>%
+  unique() %>%
+  full_join(unique(select(s, subject_id, age_group, study_group, death)), by="subject_id") %>%
+  mutate(study_group_death = ifelse(death %in% "Yes", "Death", study_group.y)) %>%
+  mutate(age_check = age_group.x == age_group.y) %>%
+  mutate(group_check = study_group_death == study_group.x)
+
+## 4 samples have mismatched age information. We don't know if these are correctly annotated. Will remove for now.
+samples_to_remove <- checks %>%
+  filter(!age_check) %>%
+  pull(Sample)
+
+antibody_toTest <- antibody %>%
+  filter(!Sample %in% samples_to_remove) %>%
+  select(subject_id, antibody, panel, value, antibody_category) %>%
+  right_join(s_toTest, by="subject_id") %>%
+  filter(!is.na(antibody)) %>%
+  mutate(value_orj = value) %>%
+  mutate(value = ifelse(value==0, 0.1, value)) %>%
+  mutate(value_log = log10(value))
+  
+```
+
+
+```{r fig.width=20, fig.height=20}
+antibody_toTest %>%
+  ggplot(aes(x=value)) +
+    geom_histogram() +
+    facet_wrap(~antibody)
+```
+
+
+
+## Fig 4A: Antibody data overview
+
+```{r fig.height=10}
+antibody_toTest %>%
+  filter(panel %in% c("panel1", "panel2")) %>%
+  filter(!(antibody_category %in% "global" & panel %in% c("panel2", "auto-antigen"))) %>% #keep the panel1 global antibodies
+  #filter(age_group != "0-5 months") %>%
+  mutate(antibody_category = factor(antibody_category)) %>%
+  mutate(antibody_category = fct_relevel(antibody_category, "RSV", after=0)) %>%
+  mutate(antibody_category = fct_relevel(antibody_category, "global", after=0)) %>%
+  ggplot(aes(x=SampleID, y=antibody, fill=value)) +
+    geom_tile() +
+    #scale_x_continuous(trans="log10") +
+    facet_grid(antibody_category~study_group_death, scales="free", space="free") +
+    scale_fill_viridis(option="magma") +
+    theme_clean() +
+    theme(
+      axis.text.x = element_blank(),
+      axis.ticks.x = element_blank(),
+      legend.position = "bottom",
+      legend.key.width = unit(1.5, "cm")
+    ) +
+    labs(
+      x="", y=""
+    )
+ggsave("perch_Fig4A_antibody_overview.pdf", height=8, width=8.6, useDingbats=F)
+```
+
+```{r fig.height=15}
+antibody_toTest %>%
+  filter(panel %in% c("auto-antigen")) %>%
+  filter(!antibody_category %in% "global") %>%
+  #filter(!(antibody_category %in% "global" & panel %in% c("panel2", "auto-antigen"))) %>% #keep the panel1 global antibodies
+  #filter(age_group != "0-5 months") %>%
+  
+  group_by(antibody) %>%
+  mutate(value = as.numeric(scale(value))) %>%
+  ungroup() %>%
+  
+  mutate(antibody_category = factor(antibody_category)) %>%
+  mutate(antibody_category = fct_relevel(antibody_category, "global", after=0)) %>%
+  ggplot(aes(x=SampleID, y=antibody, fill=value)) +
+    geom_tile() +
+    #scale_x_continuous(trans="log10") +
+    facet_grid(antibody_category~age_group + study_group_death, scales="free", space="free") +
+    scale_fill_viridis(option="magma") +
+    theme_clean() +
+    theme(
+      axis.text.x = element_blank(),
+      axis.ticks.x = element_blank(),
+      legend.position = "bottom",
+      legend.key.width = unit(1.5, "cm")
+    ) +
+    labs(
+      x="", y="", fill="Z-score"
+    )
+ggsave("perch_autoantigen_overview.pdf", height=8, width=25, useDingbats=F)
+```
+
+
+
+```{r fig.height=10}
+antibody_toTest %>%
+  filter(panel %in% c("panel1", "panel2")) %>%
+  filter(!(antibody_category %in% "global" & panel %in% "panel2")) %>% #keep the panel1 global antibodies
+  #filter(age_group != "0-5 months") %>%
+  mutate(antibody_category = factor(antibody_category)) %>%
+  mutate(antibody_category = fct_relevel(antibody_category, "RSV", after=0)) %>%
+  mutate(antibody_category = fct_relevel(antibody_category, "global", after=0)) %>%
+  mutate(antibody_category = fct_relabel(antibody_category, function(x) gsub(" ", "\n", x))) %>%
+  mutate(antibody_category = fct_recode(antibody_category, Global="global")) %>%
+  mutate(age_group = fct_relabel(age_group, function(x) gsub(" ", "\n", x))) %>%
+  
+  mutate(antibody = fct_relabel(antibody, function(x) sub("Pertactin autotransporter protein", "PRN", x))) %>%
+  mutate(antibody = fct_relabel(antibody, function(x) sub("\\(PHUCKET\\)", "", x))) %>%
+  
+  group_by(antibody, study_group_death, age_group) %>%
+  mutate(value = mean(value, na.rm = T)) %>%
+  ungroup() %>%
+  
+  mutate(antibody = sub("pertusis", "pertussis", antibody)) %>%
+  mutate(antibody_category = factor(antibody_category)) %>%
+  mutate(antibody_category = fct_relevel(antibody_category, "Bacteria", after=Inf)) %>%
+  
+  ggplot(aes(x=study_group_death, y=antibody, fill=value)) +
+    geom_tile() +
+    #scale_x_continuous(trans="log10") +
+    facet_grid(antibody_category~age_group, scales="free", space="free") +
+    scale_fill_viridis(option="magma") +
+    theme_clean() +
+    theme(
+      #axis.text.x = element_blank(),
+      #axis.ticks.x = element_blank(),
+      axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1),
+      legend.position = "bottom",
+      legend.key.width = unit(1.1, "cm"),
+      strip.text.y = element_text(angle = 0)
+    ) +
+    labs(
+      x="", y="", fill=""
+    )
+ggsave("perch_Fig4A_antibody_overview2.pdf", height=8, width=6, useDingbats=F)
+```
+
+
+
+```{r fig.height=15}
+antibody_toTest %>%
+  filter(panel %in% "auto-antigen") %>%
+  filter(!antibody_category %in% "global") %>%
+  filter(!antibody %in% "BPI") %>%
+  filter(!(antibody_category %in% "global" & panel %in% "panel2")) %>% #keep the panel1 global antibodies
+  #filter(age_group != "0-5 months") %>%
+  mutate(antibody_category = factor(antibody_category)) %>%
+  mutate(antibody_category = fct_relevel(antibody_category, "global", after=0)) %>%
+  #mutate(study_group_death = fct_relabel(study_group_death, function(x) gsub(" ", "\n", x))) %>%
+  
+  group_by(antibody) %>%
+  mutate(value = as.numeric(scale(value))) %>%
+  ungroup() %>%
+  
+  group_by(antibody, study_group_death, age_group) %>%
+  mutate(value = mean(value, na.rm = T)) %>%
+  ungroup() %>%
+  
+  mutate(antibody = sub("pertusis", "pertussis", antibody)) %>%
+  mutate(antibody_category = factor(antibody_category)) %>%
+  mutate(antibody_category = fct_relevel(antibody_category, "Bacteria", after=Inf)) %>%
+  
+  ggplot(aes(x=study_group_death, y=antibody, fill=value)) +
+    geom_tile() +
+    #scale_x_continuous(trans="log10") +
+    facet_grid(antibody_category~age_group, scales="free", space="free") +
+    scale_fill_viridis(option="magma") +
+    theme_clean() +
+    theme(
+      #axis.text.x = element_blank(),
+      #axis.ticks.x = element_blank(),
+      axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1),
+      legend.position = "bottom",
+      legend.key.width = unit(0.8, "cm")
+    ) +
+    labs(
+      x="", y="", fill="Mean Z-score"
+    )
+ggsave("perch_autoantigen_overview2.pdf", height=8, width=5.8, useDingbats=F)
+```
+
+
+```{r}
+antibody_toTest %>%
+  filter(panel %in% c("panel1", "panel2")) %>%
+  filter(antibody %in% c("Anti-human IgG Fc fragment specific", "Anti-human IgG F (ab') fragment specific", "Anti-human IgG (H+L)", "Human IgG from serum")) %>%
+  select(SampleID, subject_id, antibody, panel, age_group, study_group_death, value) %>%
+  pivot_wider(names_from="panel", values_from="value") %>%
+  ggplot(aes(x=panel1, y=panel2)) +
+    geom_point() +
+    geom_abline(slope=1, intercept=0, linetype=2) +
+    facet_wrap(~antibody) +
+    coord_equal() +
+    theme_clean()
+ggsave("perch_wholeIgg_correlation.pdf", height=4, width=6, useDingbats=F)
+```
+
+
+```{r fig.width=6}
+
+
+antibody_toTest %>%
+  filter(antibody %in% "H. influenzae") %>%
+  ggplot(aes(x=age_group, y=value, color=study_group_death)) +
+    geom_boxplot(outlier.alpha=0) +
+    geom_quasirandom(dodge.width=0.75) +
+    scale_color_manual(values=ann_colors$study_group_death) +
+    theme_clean() +
+    labs(
+      x="", color="",
+      y="H. influenza antibody levels"
+    )
+```
+
+
+```{r fig.width=15}
+# averages in healthy over time
+antibody_toTest %>%
+  filter(study_group_collapse %in% "Control") %>%
+  
+  mutate(category = ifelse(antibody %in% c("Anti-human IgG Fc fragment specific", "Anti-human IgG F (ab') fragment specific", "Anti-human IgG (H+L)", "Human IgG from serum"), "totals", "individual")) %>%
+  
+  group_by(antibody, panel, category, age_group) %>%
+  summarize(mean_val = mean(value), sd_val = sd(value)) %>%
+  ungroup() %>%
+  ggplot(aes(x=age_group, y=mean_val, group=antibody,color=category)) +
+    geom_line() +
+    geom_point() +
+    facet_wrap(~panel) +
+    theme_clean()
+```
+
+
+
+
+```{r fig.height=20, fig.width=20}
+## box and whisker plots
+antibody_auto %>%
+  ggplot(aes(x=age_group, y=value, color=study_group_death)) +
+    geom_boxplot(outlier.alpha=0) +
+    geom_quasirandom(dodge.width=0.75) +
+    theme_clean() +
+    theme(
+      axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)
+    ) +
+    scale_y_continuous(trans="log10") +
+    scale_color_manual(values=ann_colors$study_group_death) +
+    facet_wrap(~antibody, scales = "free_y")
+ggsave("perch_auto_antibody_boxplot.pdf", height=20, width=20, useDingbats=F)
+```
+
+
+```{r fig.height=15, fig.width=15}
+## box and whisker plots
+antibody_auto %>%
+  filter(age_group %in% "24-59 months") %>%
+  ggplot(aes(x=study_group_death, y=value, color=study_group_death)) +
+    geom_boxplot(outlier.alpha=0) +
+    geom_quasirandom(dodge.width=0.75) +
+    theme_clean() +
+    theme(
+      axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)
+    ) +
+    scale_y_continuous(trans="log10") +
+    scale_color_manual(values=ann_colors$study_group_death) +
+    facet_wrap(~antibody, scales = "free_y")
+ggsave("perch_auto_antibody_boxplot_gt2_only.pdf", height=20, width=20, useDingbats=F)
+```
+
+
+
+
+## Fig 4B: PCA plot
+
+PCA plot of antibody profiles
+
+
+### Against bugs
+
+```{r}
+antibody_bugs <- antibody_toTest %>%
+  filter(panel %in% c("panel1", "panel2")) %>%
+  filter(!(antibody_category %in% "global" & panel %in% "panel2")) %>%
+  droplevels()
+
+s_antibody <- antibody_bugs %>%
+  select(subject_id, age_group, study_group_death, isDeath) %>%
+  unique()
+```
+
+
+PCA plot after scaling the values
+
+```{r}
+antibody_matrix <- antibody_bugs %>%
+  group_by(antibody) %>%
+  mutate(value = as.numeric(scale(value))) %>%
+  ungroup() %>%
+  usedist::pivot_to_numeric_matrix(antibody, subject_id, value)
+
+
+pca <- prcomp(t(antibody_matrix))
+pc_pct <- round((pca$sdev^2) / sum(pca$sdev^2) * 100)
+
+
+centroids <- data_frame(PC1=pca$x[,1], PC2=pca$x[,2], subject_id = rownames(pca$x)) %>%
+  left_join(s_antibody, by="subject_id") %>%
+  group_by(age_group, study_group_death, isDeath) %>%
+  summarize(PC1=mean(PC1), PC2=mean(PC2)) %>%
+  ungroup()
+  
+
+s_antibody %>%
+  merge(pca$x[,1:2], by.x="subject_id", by.y="row.names") %>%
+  ggplot(aes(x=PC1, y=PC2, color=study_group_death)) +
+    geom_point(alpha=0.5) +
+    #stat_ellipse(aes(linetype=isDeath)) +
+    geom_point(data=centroids, shape=21, stroke=1, size=2.5, color="black", aes(fill=study_group_death)) +
+    scale_color_manual(values=ann_colors$study_group_death) +
+    scale_fill_manual(values=ann_colors$study_group_death) +
+    scale_alpha_manual(values=c(0.4,0.9)) +
+    scale_shape_manual(values=c(16,10)) +
+    facet_wrap(~age_group, ncol=4) +
+    theme_clean_pcoa() +
+    labs(
+      color="", shape="", fill="",
+      x=paste0("PCA axis 1 (", pc_pct[1], "%)"),
+      y=paste0("PCA axis 2 (", pc_pct[2], "%)")
+    )
+#ggsave("perch_Fig4B_PCA_pathogen_antigen.pdf", height=2, width=10, useDingbats=F)
+```
+
+
+
+
+```{r}
+
+antibody_matrix <- antibody_bugs %>%
+  usedist::pivot_to_numeric_matrix(antibody, subject_id, value)
+
+
+pca <- prcomp(t(antibody_matrix))
+pc_pct <- round((pca$sdev^2) / sum(pca$sdev^2) * 100)
+
+
+centroids <- data_frame(PC1=pca$x[,1], PC2=pca$x[,2], subject_id = rownames(pca$x)) %>%
+  left_join(s_antibody, by="subject_id") %>%
+  group_by(age_group, study_group_death, isDeath) %>%
+  summarize(PC1=mean(PC1), PC2=mean(PC2)) %>%
+  ungroup()
+  
+
+s_antibody %>%
+  merge(pca$x[,1:2], by.x="subject_id", by.y="row.names") %>%
+  ggplot(aes(x=PC1, y=PC2, color=study_group_death)) +
+    geom_point(alpha=0.5) +
+    #stat_ellipse(aes(linetype=isDeath)) +
+    geom_point(data=centroids, shape=21, stroke=1, size=2.5, color="black", aes(fill=study_group_death)) +
+    scale_color_manual(values=ann_colors$study_group_death) +
+    scale_fill_manual(values=ann_colors$study_group_death) +
+    scale_alpha_manual(values=c(0.4,0.9)) +
+    scale_shape_manual(values=c(16,10)) +
+    facet_wrap(~age_group, ncol=4) +
+    theme_clean_pcoa() +
+    labs(
+      color="", shape="", fill="",
+      x=paste0("PCA axis 1 (", pc_pct[1], "%)"),
+      y=paste0("PCA axis 2 (", pc_pct[2], "%)")
+    )
+ggsave("perch_Fig4B_PCA_pathogen_antigen.pdf", height=2, width=10, useDingbats=F)
+```
+
+
+
+
+For each age group: distmat ~ study_group_death
+
+```{r eval=T}
+euc_bugs <- vegdist(t(antibody_matrix), method="euclidean", binary=F)
+
+summaries_df <- s_antibody %>%
+  group_by(age_group) %>%
+  do(adonispost(
+    ., distmat = euc_bugs, formula = distmat ~ study_group_death,
+    sample_id_var = subject_id, permutations=999, which = study_group_death, alpha = 1)) %>%
+  ungroup() %>%
+  
+  filter(!term %in% c("Residual", "Total")) %>%
+  select(-one_of(c("sumsq"))) %>%
+  filter(grepl("Death", comparison)) %>%
+  
+  
+
+# If you don't need the shuffling functionality, you can use
+# summaries_df <- adonisplus(s_toTest, wu, distmat ~ study_group)
+# If you would like to test pairs of groups, use adonispost
+
+summaries_df %>%
+  select(-term)%>%
+  kable_style()
+```
+
+
+
+
+### Auto-antibodies
+
+```{r}
+antibody_auto <- antibody_toTest %>%
+  filter(panel %in% c("auto-antigen")) %>%
+  droplevels()
+
+s_antibody <- antibody_auto %>%
+  select(subject_id, age_group, study_group_death, isDeath) %>%
+  unique()
+```
+
+
+
+```{r}
+antibody_matrix <- antibody_auto %>%
+  group_by(antibody) %>%
+  mutate(value = as.numeric(scale(value))) %>%
+  ungroup() %>%
+  usedist::pivot_to_numeric_matrix(antibody, subject_id, value)
+
+pca <- prcomp(t(antibody_matrix))
+pc_pct <- round((pca$sdev^2) / sum(pca$sdev^2) * 100)
+
+
+centroids <- data_frame(PC1=pca$x[,1], PC2=pca$x[,2], subject_id = rownames(pca$x)) %>%
+  left_join(s_antibody, by="subject_id") %>%
+  group_by(age_group, study_group_death, isDeath) %>%
+  summarize(PC1=mean(PC1), PC2=mean(PC2)) %>%
+  ungroup()
+  
+
+s_antibody %>%
+  merge(pca$x[,1:2], by.x="subject_id", by.y="row.names") %>%
+  ggplot(aes(x=PC1, y=PC2, color=study_group_death)) +
+    geom_point(alpha=0.5) +
+    #stat_ellipse(aes(linetype=isDeath)) +
+    geom_point(data=centroids, shape=21, stroke=1, size=2.5, color="black", aes(fill=study_group_death)) +
+    scale_color_manual(values=ann_colors$study_group_death) +
+    scale_fill_manual(values=ann_colors$study_group_death) +
+    scale_alpha_manual(values=c(0.4,0.9)) +
+    scale_shape_manual(values=c(16,10)) +
+    facet_wrap(~age_group, ncol=4) +
+    theme_clean_pcoa() +
+    labs(
+      color="", shape="", fill="",
+      x=paste0("PCA axis 1 (", pc_pct[1], "%)"),
+      y=paste0("PCA axis 2 (", pc_pct[2], "%)")
+    )
+#ggsave("perch_Fig4F_PCA_auto_antigen.pdf", height=2, width=10, useDingbats=F)
+```
+
+PCA plot of auto-antibody profiles
+
+
+```{r}
+antibody_matrix <- antibody_auto %>%
+  usedist::pivot_to_numeric_matrix(antibody, subject_id, value)
+
+pca <- prcomp(t(antibody_matrix))
+pc_pct <- round((pca$sdev^2) / sum(pca$sdev^2) * 100)
+
+
+centroids <- data_frame(PC1=pca$x[,1], PC2=pca$x[,2], subject_id = rownames(pca$x)) %>%
+  left_join(s_antibody, by="subject_id") %>%
+  group_by(age_group, study_group_death, isDeath) %>%
+  summarize(PC1=mean(PC1), PC2=mean(PC2)) %>%
+  ungroup()
+  
+
+s_antibody %>%
+  merge(pca$x[,1:2], by.x="subject_id", by.y="row.names") %>%
+  ggplot(aes(x=PC1, y=PC2, color=study_group_death)) +
+    geom_point(alpha=0.5) +
+    #stat_ellipse(aes(linetype=isDeath)) +
+    geom_point(data=centroids, shape=21, stroke=1, size=2.5, color="black", aes(fill=study_group_death)) +
+    scale_color_manual(values=ann_colors$study_group_death) +
+    scale_fill_manual(values=ann_colors$study_group_death) +
+    scale_alpha_manual(values=c(0.4,0.9)) +
+    scale_shape_manual(values=c(16,10)) +
+    facet_wrap(~age_group, ncol=4) +
+    theme_clean_pcoa() +
+    labs(
+      color="", shape="", fill="",
+      x=paste0("PCA axis 1 (", pc_pct[1], "%)"),
+      y=paste0("PCA axis 2 (", pc_pct[2], "%)")
+    )
+ggsave("perch_Fig4F_PCA_auto_antigen.pdf", height=2, width=10, useDingbats=F)
+```
+
+
+
+
+
+For each age group: distmat ~ study_group_death
+
+```{r eval=T}
+euc_auto <- vegdist(t(antibody_matrix), method="euclidean", binary=F)
+
+summaries_df <- s_antibody %>%
+  group_by(age_group) %>%
+  do(adonispost(
+    ., distmat = euc_auto, formula = distmat ~ study_group_death,
+    sample_id_var = subject_id, permutations=999, which = study_group_death, alpha = 1)) %>%
+  ungroup() %>%
+  
+  filter(!term %in% c("Residual", "Total")) %>%
+  select(-one_of(c("sumsq"))) %>%
+  filter(grepl("Death", comparison)) 
+  
+  
+
+# If you don't need the shuffling functionality, you can use
+# summaries_df <- adonisplus(s_toTest, wu, distmat ~ study_group)
+# If you would like to test pairs of groups, use adonispost
+
+summaries_df %>%
+  select(-term)%>%
+  kable_style()
+```
+
+## Fig 4E: Total IgG data
+
+This is using the IgG data from panel 1.
+
+```{r fig.width=8}
+
+
+antibody_toTest %>%
+  filter(panel %in% "panel1") %>%
+  filter(antibody %in% c("Human IgG from serum")) %>%
+  mutate(age_group = fct_relabel(age_group, function(x) sub(" ", "\n", x))) %>%
+  mutate(antibody = sub("human ", "human\n", antibody)) %>%
+  ggplot(aes(x=age_group, y=value, color=study_group_death)) +
+    geom_boxplot(outlier.alpha=0) +
+    geom_quasirandom(dodge.width=0.75, size=0.7) +
+    scale_color_manual(values=ann_colors$study_group_death) +
+    scale_y_continuous(trans="log10", limits=c(700, 80000), breaks=c(1000, 3000, 10000, 30000, 100000), labels=c("1000", "3000", "10000", "30000", "100000")) +
+    facet_wrap(~antibody, ncol=4) +
+    theme_clean() +
+    theme(
+      legend.position="bottom"
+    ) +
+    labs(
+      x="", color="",
+      y="Antibody levels"
+    )
+ggsave("perch_Fig4E_total_igg.pdf", height=3, width=3.5, useDingbats=F)
+```
+
+
+value_log ~ study_group_death
+
+```{r fig.width=8}
+
+
+summaries_df <- antibody_toTest %>%
+  filter(panel %in% "panel1") %>%
+  filter(antibody %in% c("Human IgG from serum")) %>%
+  #mutate(age_group = fct_relabel(age_group, function(x) sub(" ", "\n", x))) %>%
+  #mutate(antibody = sub("human ", "human\n", antibody)) %>%
+  
+  group_by(age_group, antibody, panel) %>%
+  
+  # for regular linear models
+  #do(tidy(lm(value ~ study_group_death, data=.))) %>%
+  do(tidy_lm_posthoc(lm(value_log ~ study_group_death, data=.), "study_group_death")) %>%
+  
+  # for linear mixed effects models
+  #do(tidy(nlme::lme(alpha ~ study_group, random=~1|subject_id, data=., na.action=na.omit), effect="fixed")) %>%
+  #do(tidy_lm_posthoc(nlme::lme(alpha ~ study_group, random=~1|subject_id, data=., na.action=na.omit), "study_group")) %>%
+  
+  ungroup() %>%
+  
+  filter(!grepl("Intercept|Residuals", term)) %>%
+  #mutate(term = sub("study_group_death", "Death - ", term)) %>%
+  #mutate(term = sub("age_group", "0-5 months - ", term)) %>%
+  
+  group_by(term, age_group) %>%
+  mutate(fdr = p.adjust(p.value, method="BH")) %>%
+  ungroup()
+  
+```
+
+
+
+```{r fig.width=10, fig.height=3}
+
+summaries_df %>%
+  filter(!is.na(estimate)) %>%
+  #mutate(estimate = -estimate) %>%
+  #mutate(term = sub("Death - ", "Compared to\n", term)) %>%
+  
+  #group_by(antibody) %>%
+  #mutate(num_sig = any(fdr<0.1)) %>%
+  #ungroup() %>%
+  #filter(num_sig) %>%
+  
+  #mutate(antibody = reorder(antibody, -estimate)) %>%
+  mutate(isSig = ifelse(p.value < 0.05, "p<0.05", "p>0.05")) %>%
+  
+  #mutate(Taxa = fct_relabel(Taxa, function(x) sub("Pseudomonadota |Bacteroidota |Bacillota |Actinomycetota", "", x))) %>%
+  
+  #mutate(term = sub("Control without RTI - ", "", term))
+  
+  ggplot(aes(x=estimate, y=antibody, color=term, shape=isSig)) +
+    geom_vline(xintercept=0, linetype=2) +
+    geom_pointrange(aes(xmin=estimate-std.error, xmax=estimate+std.error), position = position_dodge(width = 0.5)) +
+    scale_shape_manual(values=c(16,1)) +
+    #scale_color_brewer(palette="Set1") +
+    #scale_color_manual(values=ann_colors$age_group) +
+    facet_grid(.~age_group, space="free", scales="free") +
+    theme_clean() +
+    theme(
+      strip.text.y = element_text(angle = 0)
+    ) +
+    labs(
+      x="Log difference between groups",
+      y="", color="", shape=""
+    )
+#ggsave("perch_global_antibody_diffab.pdf", height=5, width=10, useDingbats=F)
+```
+
+
+
+This is using the IgG data for the auto-antigen
+
+
+
+```{r fig.width=8}
+
+
+antibody_toTest %>%
+  filter(panel %in% "auto-antigen") %>%
+  filter(antibody %in% c("Human IgG from serum")) %>%
+  mutate(age_group = fct_relabel(age_group, function(x) sub(" ", "\n", x))) %>%
+  mutate(antibody = sub("human ", "human\n", antibody)) %>%
+  ggplot(aes(x=age_group, y=value, color=study_group_death)) +
+    geom_boxplot(outlier.alpha=0) +
+    geom_quasirandom(dodge.width=0.75, size=0.7) +
+    scale_color_manual(values=ann_colors$study_group_death) +
+    scale_y_continuous(trans="log10", limits=c(700, 80000), breaks=c(1000, 3000, 10000, 30000, 100000), labels=c("1000", "3000", "10000", "30000", "100000")) +
+    facet_wrap(~antibody, ncol=4) +
+    theme_clean() +
+    theme(
+      legend.position="bottom"
+    ) +
+    labs(
+      x="", color="",
+      y="Antibody levels"
+    )
+#ggsave("perch_Fig4E_total_igg.pdf", height=3, width=3.5, useDingbats=F)
+```
+
+
+value_log ~ study_group_death
+
+```{r fig.width=8}
+
+
+summaries_df <- antibody_toTest %>%
+  filter(panel %in% "auto-antigen") %>%
+  filter(antibody %in% c("Human IgG from serum")) %>%
+  #mutate(age_group = fct_relabel(age_group, function(x) sub(" ", "\n", x))) %>%
+  #mutate(antibody = sub("human ", "human\n", antibody)) %>%
+  
+  group_by(age_group, antibody, panel) %>%
+  
+  # for regular linear models
+  #do(tidy(lm(value ~ study_group_death, data=.))) %>%
+  do(tidy_lm_posthoc(lm(value_log ~ study_group_death, data=.), "study_group_death")) %>%
+  
+  # for linear mixed effects models
+  #do(tidy(nlme::lme(alpha ~ study_group, random=~1|subject_id, data=., na.action=na.omit), effect="fixed")) %>%
+  #do(tidy_lm_posthoc(nlme::lme(alpha ~ study_group, random=~1|subject_id, data=., na.action=na.omit), "study_group")) %>%
+  
+  ungroup() %>%
+  
+  filter(!grepl("Intercept|Residuals", term)) %>%
+  #mutate(term = sub("study_group_death", "Death - ", term)) %>%
+  #mutate(term = sub("age_group", "0-5 months - ", term)) %>%
+  
+  group_by(term, age_group) %>%
+  mutate(fdr = p.adjust(p.value, method="BH")) %>%
+  ungroup()
+  
+```
+
+
+
+```{r fig.width=10, fig.height=3}
+
+summaries_df %>%
+  filter(!is.na(estimate)) %>%
+  #mutate(estimate = -estimate) %>%
+  #mutate(term = sub("Death - ", "Compared to\n", term)) %>%
+  
+  #group_by(antibody) %>%
+  #mutate(num_sig = any(fdr<0.1)) %>%
+  #ungroup() %>%
+  #filter(num_sig) %>%
+  
+  #mutate(antibody = reorder(antibody, -estimate)) %>%
+  mutate(isSig = ifelse(p.value < 0.05, "p<0.05", "p>0.05")) %>%
+  
+  #mutate(Taxa = fct_relabel(Taxa, function(x) sub("Pseudomonadota |Bacteroidota |Bacillota |Actinomycetota", "", x))) %>%
+  
+  #mutate(term = sub("Control without RTI - ", "", term))
+  
+  ggplot(aes(x=estimate, y=antibody, color=term, shape=isSig)) +
+    geom_vline(xintercept=0, linetype=2) +
+    geom_pointrange(aes(xmin=estimate-std.error, xmax=estimate+std.error), position = position_dodge(width = 0.5)) +
+    scale_shape_manual(values=c(16,1)) +
+    #scale_color_brewer(palette="Set1") +
+    #scale_color_manual(values=ann_colors$age_group) +
+    facet_grid(.~age_group, space="free", scales="free") +
+    theme_clean() +
+    theme(
+      strip.text.y = element_text(angle = 0)
+    ) +
+    labs(
+      x="Log difference between groups",
+      y="", color="", shape=""
+    )
+#ggsave("perch_global_antibody_diffab.pdf", height=5, width=10, useDingbats=F)
+```
+
+## Age difference in antibodies
+
+### Against bugs
+
+value_log ~ age_group
+
+```{r}
+summaries_df <- antibody_bugs %>%
+  filter(study_group_collapse %in% "Control") %>%
+  #filter(panel %in% c("panel1", "panel2")) %>%
+  
+  group_by(antibody, panel) %>%
+  # for regular linear models
+  #do(tidy(lm(value ~ study_group_death, data=.))) %>%
+  do(tidy_lm_posthoc(lm(value_log ~ age_group, data=.), "age_group")) %>%
+  
+  # for linear mixed effects models
+  #do(tidy(nlme::lme(alpha ~ study_group, random=~1|subject_id, data=., na.action=na.omit), effect="fixed")) %>%
+  #do(tidy_lm_posthoc(nlme::lme(alpha ~ study_group, random=~1|subject_id, data=., na.action=na.omit), "study_group")) %>%
+  
+  ungroup() %>%
+  
+  filter(!grepl("Intercept|Residuals", term)) %>%
+  mutate(term = sub("study_group_death", "Death - ", term)) %>%
+  #mutate(term = sub("age_group", "0-5 months - ", term)) %>%
+  
+  group_by(term) %>%
+  mutate(fdr = p.adjust(p.value, method="BH")) %>%
+  ungroup()
+
+#summaries_df %>%
+#  select(-statistic) %>%
+#  kable_style(fdr, 0.1)
+```
+
+
+
+```{r fig.width=10, fig.height=7}
+
+summaries_df %>%
+  
+  filter(!is.na(estimate)) %>%
+
+  group_by(antibody) %>%
+  mutate(num_sig = any(fdr<0.1)) %>%
+  ungroup() %>%
+  filter(num_sig) %>%
+  
+  droplevels() %>%
+  
+  mutate(antibody = reorder(antibody, estimate)) %>%
+  mutate(isSig = ifelse(fdr < 0.1, "q<0.1", "q>0.1")) %>%
+  
+  #mutate(Taxa = fct_relabel(Taxa, function(x) sub("Pseudomonadota |Bacteroidota |Bacillota |Actinomycetota", "", x))) %>%
+  
+  #mutate(term = sub("Control without RTI - ", "", term))
+  
+  ggplot(aes(x=estimate, y=antibody, color=term, shape=isSig)) +
+    geom_vline(xintercept=0, linetype=2) +
+    geom_pointrange(aes(xmin=estimate-std.error, xmax=estimate+std.error), position = position_dodge(width = 0.5)) +
+    scale_shape_manual(values=c(16,1)) +
+    scale_color_brewer(palette="Dark2") +
+    #scale_color_manual(values=ann_colors$age_group) +
+    facet_wrap(~panel, scales="free") +
+    theme_clean() +
+    theme(
+      strip.text.y = element_text(angle = 0)
+    ) +
+    labs(
+      x="Log difference between groups",
+      y="", color="", shape=""
+    )
+```
+
+### Auto-antibodies
+
+
+## Fig 4C: Diff ab
+
+### Against bugs
+
+For each age group: value ~ study_group_death
+
+All the tests are done with the "death" group as the reference
+
+```{r}
+summaries_df <- antibody_bugs %>%
+  #filter(age_group != "0-5 months") %>%
+  mutate(study_group_death = fct_relevel(study_group_death, "Death", after=0)) %>%
+  
+  filter(antibody_category != "global") %>%
+  
+  group_by(age_group, antibody, antibody_category, panel) %>%
+  
+  # for regular linear models
+  do(tidy(lm(value_log ~ study_group_death, data=.))) %>%
+  #do(tidy_lm_posthoc(lm(alpha ~ study_group_collapse_control, data=.), "study_group_collapse_control")) %>%
+  
+  # for linear mixed effects models
+  #do(tidy(nlme::lme(alpha ~ study_group, random=~1|subject_id, data=., na.action=na.omit), effect="fixed")) %>%
+  #do(tidy_lm_posthoc(nlme::lme(alpha ~ study_group, random=~1|subject_id, data=., na.action=na.omit), "study_group")) %>%
+  
+  ungroup() %>%
+  
+  filter(!grepl("Intercept|Residuals", term)) %>%
+  mutate(term = sub("study_group_death", "Death - ", term)) %>%
+  #mutate(term = sub("age_group", "0-5 months - ", term)) %>%
+  
+  group_by(term, age_group) %>%
+  mutate(fdr = p.adjust(p.value, method="BH")) %>%
+  ungroup()
+
+#summaries_df %>%
+#  select(-statistic) %>%
+#  kable_style(fdr, 0.1)
+```
+
+
+
+```{r fig.width=10, fig.height=7}
+
+summaries_df %>%
+  mutate(estimate = -estimate) %>%
+  mutate(term = sub("Death - ", "", term)) %>%
+  
+  group_by(antibody) %>%
+  mutate(num_sig = any(fdr<0.1)) %>%
+  ungroup() %>%
+  filter(num_sig) %>%
+  
+  mutate(antibody = reorder(antibody, -estimate)) %>%
+  mutate(isSig = ifelse(fdr < 0.1, "q<0.1", "q>0.1")) %>%
+  
+  
+  mutate(antibody_category = factor(antibody_category)) %>%
+  mutate(antibody_category = fct_relevel(antibody_category, "RSV", after=0)) %>%
+  mutate(antibody_category = fct_relevel(antibody_category, "global", after=0)) %>%
+  mutate(antibody_category = fct_relevel(antibody_category, "Bacteria", after=Inf)) %>%
+  
+  mutate(antibody_category = fct_relabel(antibody_category, function(x) gsub(" ", "\n", x))) %>%
+  mutate(antibody_category = fct_recode(antibody_category, Total="global")) %>%
+  #mutate(antibody_category = fct_rev(antibody_category)) %>%
+  
+  mutate(antibody = fct_relabel(antibody, function(x) sub("Pertactin autotransporter protein", "PRN", x))) %>%
+  mutate(antibody = fct_relabel(antibody, function(x) sub("\\(PHUCKET\\)", "", x))) %>%
+  
+  ggplot(aes(x=estimate, y=antibody, color=term, shape=isSig)) +
+    geom_vline(xintercept=0, linetype=2) +
+    geom_pointrange(aes(xmin=estimate-std.error, xmax=estimate+std.error), position = position_dodge(width = 0.5)) +
+    scale_shape_manual(values=c(16,1)) +
+    #scale_color_brewer(palette="Set1") +
+    scale_color_manual(values=ann_colors$study_group_collapse_control) +
+    facet_grid(antibody_category~age_group, space="free", scales="free") +
+    scale_x_continuous(breaks=c(-2, -1, 0, 1, 2)) +
+    theme_clean() +
+    theme(
+      strip.text.y = element_text(angle = 0),
+      legend.position = "bottom"
+    ) +
+    labs(
+      x="Log difference between groups",
+      y="", color="", shape=""
+    )
+ggsave("perch_Fig4C_antibody_diffab.pdf", height=5.2, width=8, useDingbats=F)
+```
+
+
+Now we are excluding the subjects who died.
+
+For each age group: value_log ~ study_group_collapse_control
+
+```{r}
+summaries_df <- antibody_bugs %>%
+  
+  filter(!study_group_death %in% "Death") %>%
+  
+  group_by(age_group, antibody, panel) %>%
+  
+  # for regular linear models
+  #do(tidy(lm(value ~ study_group_death, data=.))) %>%
+  do(tidy_lm_posthoc(lm(value_log ~ study_group_collapse_control, data=.), "study_group_collapse_control")) %>%
+  
+  # for linear mixed effects models
+  #do(tidy(nlme::lme(alpha ~ study_group, random=~1|subject_id, data=., na.action=na.omit), effect="fixed")) %>%
+  #do(tidy_lm_posthoc(nlme::lme(alpha ~ study_group, random=~1|subject_id, data=., na.action=na.omit), "study_group")) %>%
+  
+  ungroup() %>%
+  
+  filter(!grepl("Intercept|Residuals", term)) %>%
+  #mutate(term = sub("study_group_death", "Death - ", term)) %>%
+  #mutate(term = sub("age_group", "0-5 months - ", term)) %>%
+  
+  group_by(term, age_group) %>%
+  mutate(fdr = p.adjust(p.value, method="BH")) %>%
+  ungroup()
+
+#summaries_df %>%
+#  select(-statistic) %>%
+#  kable_style(fdr, 0.1)
+```
+
+
+
+```{r fig.width=10, fig.height=3}
+
+summaries_df %>%
+  
+  filter(!is.na(estimate)) %>%
+  #filter(grepl("Control", term)) %>%
+  #droplevels() %>%
+  
+  group_by(antibody) %>%
+  mutate(num_sig = any(fdr<0.1)) %>%
+  ungroup() %>%
+  filter(num_sig) %>%
+  
+  mutate(antibody = reorder(antibody, estimate)) %>%
+  mutate(isSig = ifelse(fdr < 0.1, "q<0.1", "q>0.1")) %>%
+  
+  #mutate(Taxa = fct_relabel(Taxa, function(x) sub("Pseudomonadota |Bacteroidota |Bacillota |Actinomycetota", "", x))) %>%
+  
+  #mutate(term = sub("Control without RTI - ", "", term))
+  
+  ggplot(aes(x=estimate, y=antibody, color=term, shape=isSig)) +
+    geom_vline(xintercept=0, linetype=2) +
+    geom_pointrange(aes(xmin=estimate-std.error, xmax=estimate+std.error), position = position_dodge(width = 0.5)) +
+    scale_shape_manual(values=c(16,1)) +
+    scale_color_brewer(palette="Set1") +
+    #scale_color_manual(values=ann_colors$age_group) +
+    facet_wrap(~age_group, ncol=4) +
+    theme_clean() +
+    theme(
+      strip.text.y = element_text(angle = 0)
+    ) +
+    labs(
+      x="Log difference between groups",
+      y="", color="", shape=""
+    )
+#ggsave("perch_Fig4D_diffAb_2.pdf", height=2.5, width=6.5, useDingbats=F)
+```
+
+### Auto-antibodies
+
+For each age group: value_log ~ study_group_death
+
+```{r}
+summaries_df <- antibody_auto %>%
+  #filter(age_group != "0-5 months") %>%
+  #filter(panel %in% c("auto-antigen")) %>%
+  mutate(study_group_death = fct_relevel(study_group_death, "Death", after=0)) %>%
+  
+  filter(antibody_category != "global") %>%
+  
+  group_by(age_group, antibody, antibody_category, panel) %>%
+  
+  # for regular linear models
+  do(tidy(lm(value_log ~ study_group_death, data=.))) %>%
+  #do(tidy_lm_posthoc(lm(alpha ~ study_group_collapse_control, data=.), "study_group_collapse_control")) %>%
+  
+  # for linear mixed effects models
+  #do(tidy(nlme::lme(alpha ~ study_group, random=~1|subject_id, data=., na.action=na.omit), effect="fixed")) %>%
+  #do(tidy_lm_posthoc(nlme::lme(alpha ~ study_group, random=~1|subject_id, data=., na.action=na.omit), "study_group")) %>%
+  
+  ungroup() %>%
+  
+  filter(!grepl("Intercept|Residuals", term)) %>%
+  mutate(term = sub("study_group_death", "Death - ", term)) %>%
+  #mutate(term = sub("age_group", "0-5 months - ", term)) %>%
+  
+  group_by(term, age_group) %>%
+  mutate(fdr = p.adjust(p.value, method="BH")) %>%
+  ungroup()
+
+#summaries_df %>%
+#  select(-statistic) %>%
+#  kable_style(fdr, 0.1)
+```
+
+
+
+```{r fig.width=10, fig.height=7}
+
+summaries_df %>%
+  mutate(estimate = -estimate) %>%
+  mutate(term = sub("Death - ", "", term)) %>%
+  
+  group_by(antibody) %>%
+  mutate(num_sig = any(fdr<0.1)) %>%
+  ungroup() %>%
+  filter(num_sig) %>%
+  
+  mutate(antibody = reorder(antibody, -estimate)) %>%
+  mutate(isSig = ifelse(fdr < 0.1, "q<0.1", "q>0.1")) %>%
+  
+  mutate(antibody_category = fct_rev(antibody_category)) %>%
+  #mutate(Taxa = fct_relabel(Taxa, function(x) sub("Pseudomonadota |Bacteroidota |Bacillota |Actinomycetota", "", x))) %>%
+  
+  #mutate(term = sub("Control without RTI - ", "", term))
+  
+  ggplot(aes(x=estimate, y=antibody, color=term, shape=isSig)) +
+    geom_vline(xintercept=0, linetype=2) +
+    geom_pointrange(aes(xmin=estimate-std.error, xmax=estimate+std.error), position = position_dodge(width = 0.5)) +
+    scale_shape_manual(values=c(16,1)) +
+    #scale_color_brewer(palette="Set1") +
+    scale_color_manual(values=ann_colors$study_group_collapse_control) +
+    facet_grid(antibody_category~age_group, space="free", scales="free") +
+    theme_clean() +
+    theme(
+      strip.text.y = element_text(angle = 0)
+    ) +
+    labs(
+      x="Log difference between groups",
+      y="", color="", shape=""
+    )
+
+```
+
+Now we are excluding the subjects who died:
+
+For each age group: value_log ~ study_group_collapse_control
+
+```{r}
+summaries_df <- antibody_auto %>%
+  #filter(panel %in% c("auto-antigen")) %>%
+  filter(!study_group_death %in% "Death") %>%
+  group_by(age_group, antibody, panel) %>%
+  
+  # for regular linear models
+  #do(tidy(lm(value ~ study_group_death, data=.))) %>%
+  do(tidy_lm_posthoc(lm(value_log ~ study_group_collapse_control, data=.), "study_group_collapse_control")) %>%
+  
+  # for linear mixed effects models
+  #do(tidy(nlme::lme(alpha ~ study_group, random=~1|subject_id, data=., na.action=na.omit), effect="fixed")) %>%
+  #do(tidy_lm_posthoc(nlme::lme(alpha ~ study_group, random=~1|subject_id, data=., na.action=na.omit), "study_group")) %>%
+  
+  ungroup() %>%
+  
+  filter(!grepl("Intercept|Residuals", term)) %>%
+  #mutate(term = sub("study_group_death", "Death - ", term)) %>%
+  #mutate(term = sub("age_group", "0-5 months - ", term)) %>%
+  
+  group_by(term, age_group) %>%
+  mutate(fdr = p.adjust(p.value, method="BH")) %>%
+  ungroup()
+
+#summaries_df %>%
+#  select(-statistic) %>%
+#  kable_style(fdr, 0.1)
+```
+
+
+
+```{r fig.width=10, fig.height=7}
+
+summaries_df %>%
+  
+  filter(!is.na(estimate)) %>%
+  #filter(grepl("Control", term)) %>%
+  #droplevels() %>%
+  
+  group_by(antibody) %>%
+  mutate(num_sig = any(fdr<0.1)) %>%
+  ungroup() %>%
+  filter(num_sig) %>%
+  
+  mutate(antibody = reorder(antibody, estimate)) %>%
+  mutate(isSig = ifelse(fdr < 0.1, "q<0.1", "q>0.1")) %>%
+  
+  #mutate(Taxa = fct_relabel(Taxa, function(x) sub("Pseudomonadota |Bacteroidota |Bacillota |Actinomycetota", "", x))) %>%
+  
+  #mutate(term = sub("Control without RTI - ", "", term))
+  
+  ggplot(aes(x=estimate, y=antibody, color=term, shape=isSig)) +
+    geom_vline(xintercept=0, linetype=2) +
+    geom_pointrange(aes(xmin=estimate-std.error, xmax=estimate+std.error), position = position_dodge(width = 0.5)) +
+    scale_shape_manual(values=c(16,1)) +
+    scale_color_brewer(palette="Set1") +
+    #scale_color_manual(values=ann_colors$age_group) +
+    facet_wrap(~age_group, ncol=4) +
+    theme_clean() +
+    theme(
+      strip.text.y = element_text(angle = 0)
+    ) +
+    labs(
+      x="Log difference between groups",
+      y="", color="", shape=""
+    )
+#ggsave("perch_Fig4D_diffAb_2.pdf", height=2.5, width=6.5, useDingbats=F)
+```
+
+
+Do Fisher's exact test instead. We are comparing if each study group is different than the distribution of subjects who died (within each age group)
+
+```{r}
+antibody_death <- antibody_auto %>%
+  mutate(present = ifelse(value_orj > 0, "Present", "Absent")) %>%
+  filter(study_group_death %in% "Death") %>%
+  select(subject_id, antibody, age_group, present) %>%
+  mutate(test_group = "Death") %>%
+  crossing(study_group_death = c("Control", "Severe case", "Very severe case"))
+
+summaries_df <- antibody_auto %>%
+  mutate(present = ifelse(value_orj > 0, "Present", "Absent")) %>%
+  filter(!study_group_death %in% "Death") %>%
+  select(subject_id, antibody, antibody_category, study_group_death, age_group, present) %>%
+  mutate(test_group = study_group_death) %>%
+  
+  
+  
+  bind_rows(antibody_death) %>%
+  
+  group_by(study_group_death, antibody, age_group) %>%
+  mutate(perc_present = sum(present %in% "Present") / n()) %>%
+  mutate(Keep = perc_present > 0 & perc_present < 1) %>%
+  ungroup() %>%
+  filter(Keep) %>%
+  
+  #filter(antibody %in% "IL-17A", age_group %in% "0-5 months") %>%
+  
+  group_by(antibody, age_group, study_group_death) %>%
+  do(tidy(fisher.test(.$test_group, .$present))) %>%
+  ungroup() %>%
+  
+  group_by(age_group, study_group_death) %>%
+  mutate(fdr = p.adjust(p.value, method="BH")) %>%
+  ungroup()
+  
+
+summaries_df %>%
+  select(antibody, age_group, study_group_death, estimate, p.value, fdr) %>%
+  filter(p.value < 0.05) %>%
+  kable_style(fdr, 0.1)
+```
+
+
+Take the subjects who died out and test between the rest of the groups using Fisher's exact test
+
+```{r}
+antibody_death <- antibody_auto %>%
+  mutate(present = ifelse(value_orj > 0, "Present", "Absent")) %>%
+  filter(study_group_death %in% "Control") %>%
+  select(subject_id, antibody, age_group, present) %>%
+  mutate(test_group = "Control") %>%
+  crossing(study_group_death = c("Severe case", "Very severe case"))
+
+summaries_df <- antibody_auto %>%
+  mutate(present = ifelse(value_orj > 0, "Present", "Absent")) %>%
+  filter(!study_group_death %in% c("Death", "Control")) %>%
+  select(subject_id, antibody, antibody_category, study_group_death, age_group, present) %>%
+  mutate(test_group = study_group_death) %>%
+  
+  bind_rows(antibody_death) %>%
+  
+  group_by(study_group_death, antibody, age_group) %>%
+  mutate(perc_present = sum(present %in% "Present") / n()) %>%
+  mutate(Keep = perc_present > 0 & perc_present < 1) %>%
+  ungroup() %>%
+  filter(Keep) %>%
+  
+  #filter(antibody %in% "IL-17A", age_group %in% "0-5 months") %>%
+  
+  group_by(antibody, age_group, study_group_death) %>%
+  do(tidy(fisher.test(.$test_group, .$present))) %>%
+  ungroup() %>%
+  
+  select(antibody, age_group, comparison = study_group_death, p.value) %>%
+  mutate(comparison = paste("Control - ", comparison))
+  
+  
+  
+
+summaries_df2 <- antibody_auto %>%
+  mutate(present = ifelse(value_orj > 0, "Present", "Absent")) %>%
+  filter(study_group_death %in% c("Severe case", "Very severe case")) %>%
+  select(subject_id, antibody, antibody_category, study_group_death, age_group, present) %>%
+  
+  group_by(antibody, age_group) %>%
+  mutate(perc_present = sum(present %in% "Present") / n()) %>%
+  mutate(Keep = perc_present > 0 & perc_present < 1) %>%
+  ungroup() %>%
+  filter(Keep) %>%
+  
+  #filter(antibody %in% "IL-17A", age_group %in% "0-5 months") %>%
+  
+  group_by(antibody, age_group) %>%
+  do(tidy(fisher.test(.$study_group_death, .$present))) %>%
+  ungroup() %>%
+  
+  select(antibody, age_group, p.value) %>%
+  mutate(comparison = "Severe - Very severe pneumonia")
+  
+
+summaries_df <- bind_rows(summaries_df, summaries_df2) %>%
+  group_by(age_group, comparison) %>%
+  mutate(fdr = p.adjust(p.value, method="BH")) %>%
+  ungroup()
+
+summaries_df %>%
+  select(antibody, age_group, study_group_death, estimate, p.value, fdr) %>%
+  filter(p.value < 0.05) %>%
+  kable_style(fdr, 0.1)
+```
+
+
+
+
+Bar plot of presence/absence of antibodies
+
+```{r fig.width=20, fig.height=20}
+antibody_auto %>%
+  mutate(present = ifelse(value_orj > 0, "Present", "Absent")) %>%
+  
+  count(antibody, age_group, study_group_death, present) %>%
+  
+  ggplot(aes(x=age_group, y=n, color=study_group_death, fill=present)) +
+    geom_col(position="dodge") +
+    scale_fill_manual(values=c("gray50", "white")) +
+    facet_wrap(~antibody) +
+    theme_clean()
+```
+
+
+Same plot but in percentages
+
+```{r fig.width=20, fig.height=20}
+
+antibody_auto %>%
+  mutate(present = ifelse(value_orj > 0, "Present", "Absent")) %>%
+  
+  count(antibody, age_group, study_group_death, present) %>%
+  group_by(antibody, age_group, study_group_death) %>%
+  mutate(total = sum(n)) %>%
+  ungroup() %>%
+  mutate(perc = n/total)  %>%
+  
+  ggplot(aes(x=age_group, y=perc, group=interaction(age_group, study_group_death), color=study_group_death, fill=present)) +
+    geom_bar(stat="identity", position = position_stack()) +
+    #geom_bar(stat="identity", position=position_dodge2()) +
+    scale_fill_manual(values=c("gray50", "white")) +
+    scale_color_manual(values=ann_colors$study_group_death) +
+    facet_wrap(~antibody) +
+    theme_clean()
+```
+
+
+
+### Fig 4G: age 6-11
+
+```{r}
+library(ggpattern)
+```
+
+```{r}
+toPlot <- summaries_df %>%
+  filter(fdr < 0.1) %>%
+  filter(age_group %in% "6-11 months") %>%
+  pull(antibody) %>%
+  unique()
+```
+
+```{r}
+antibody_auto %>%
+  filter(antibody %in% toPlot) %>%
+  filter(age_group %in% "6-11 months") %>%
+  droplevels() %>%
+  
+  mutate(present = ifelse(value_orj > 0, "Present", "Absent")) %>%
+  
+  count(antibody, age_group, study_group_death, present) %>%
+  
+  ggplot(aes(x=study_group_death, y=n, fill=study_group_death, alpha=present)) +
+    geom_col_pattern(aes(pattern=present), color="black", pattern_density = 0.1) +
+    #geom_bar(stat="identity", position = position_stack()) +
+    scale_fill_manual(values=ann_colors$study_group_death) +
+    scale_alpha_manual(values=c(0.7, 1)) +
+    scale_pattern_manual(values=c("stripe", "none")) +
+    facet_wrap(~antibody, ncol=4) +
+    theme_clean() +
+    theme(
+      aspect.ratio = 1
+    ) +
+    labs(
+      x= "", color="", fill="Auto-antigen",
+      y= "Number of subjects"
+    )
+ggsave("perch_Fig4G_auto-antibody_6_11_fishers.pdf", height=2.2, width=10, useDingbats=F)
+```
+
+
+### Fig 4H: age 24-59 months
+
+```{r}
+toPlot <- summaries_df %>%
+  filter(fdr < 0.1) %>%
+  filter(age_group %in% "24-59 months") %>%
+  pull(antibody) %>%
+  unique()
+```
+
+```{r}
+antibody_auto %>%
+  filter(antibody %in% toPlot) %>%
+  filter(age_group %in% "24-59 months") %>%
+  droplevels() %>%
+  
+  mutate(present = ifelse(value_orj > 0, "Present", "Absent")) %>%
+  
+  count(antibody, age_group, study_group_death, present) %>%
+  
+  ggplot(aes(x=study_group_death, y=n, fill=study_group_death, alpha=present)) +
+    geom_col_pattern(aes(pattern=present), color="black", pattern_density = 0.1) +
+    #geom_bar(stat="identity", position = position_stack()) +
+    scale_fill_manual(values=ann_colors$study_group_death) +
+    scale_alpha_manual(values=c(0.7, 1)) +
+    scale_pattern_manual(values=c("stripe", "none")) +
+    facet_wrap(~antibody, ncol=7) +
+    theme_clean() +
+    theme(
+      aspect.ratio = 1
+    ) +
+    labs(
+      x= "", color="", fill="Auto-antigen",
+      y= "Number of subjects"
+    )
+ggsave("perch_Fig4H_auto-antibody_gt2_fishers.pdf", height=2.2, width=22, useDingbats=F)
+```
+
+## Correlation with dysbiosis
+
+### Against bugs
+
+```{r}
+summaries_df <- antibody_bugs %>%
+  
+  group_by(antibody, age_group) %>%
+  
+  # for regular linear models
+  do(tidy(lm(value_log ~ median_dysbiosis, data=.))) %>%
+  #do(tidy_lm_posthoc(lm(props_log ~ study_group, data=.), "study_group")) %>%
+  
+  # for linear mixed effects models
+  #do(tidy(nlme::lme(props_log ~ study_group, random=~1|subject_id, data=., na.action=na.omit), effect="fixed")) %>%
+  #do(tidy_lm_posthoc(nlme::lme(props_log ~ study_group, random=~1|subject_id, data=., na.action=na.omit), "study_group")) %>%
+
+  ungroup() %>%
+  
+  filter(!grepl("Intercept|Residuals", term)) %>%
+  mutate(term = sub("study_group", "Control - ", term)) %>% ### You only need this when you are not using the tidy_lm_posthoc function
+  
+  group_by(term, age_group) %>%
+  mutate(fdr = p.adjust(p.value, method="BH")) %>%
+  ungroup()
+
+summaries_df %>%
+  filter(p.value < 0.05) %>%
+  kable_style(fdr, 0.1) #%>%
+  #column_spec(c(2:5), width = "3em")
+```
+
+
+```{r}
+antibody_bugs %>%
+  filter(antibody %in% (summaries_df %>% filter(fdr<0.1) %>% pull(antibody) %>% unique())) %>%
+  
+  ggplot(aes(x=median_dysbiosis, y=value, color=age_group)) +
+    geom_point() +
+    geom_smooth(method="lm") +
+    facet_wrap(~antibody, scales="free_y") +
+    scale_color_viridis(end=0.8, discrete=T) +
+    theme_clean()
+```
+
+
+### Auto-antibodies
+
+```{r fig.height=12, fig.width=12}
+antibody_auto %>%
+  mutate(presence = ifelse(value_orj > 0, "Present", "Absent")) %>%
+  ggplot(aes(x=presence, y=median_dysbiosis, color=age_group)) +
+    geom_boxplot(ourlier.alpha=0) +
+    geom_quasirandom(dodge.width=0.75) +
+    facet_wrap(~antibody) +
+    scale_color_viridis(end=0.8, discrete=T) +
+    theme_clean()
+```
+
+
+```{r}
+summaries_df <- antibody_auto %>%
+  mutate(present = ifelse(value_orj > 0, "Present", "Absent")) %>%
+  
+  group_by(study_group_death, antibody, age_group) %>%
+  mutate(perc_present = sum(present %in% "Present") / n()) %>%
+  mutate(Keep = perc_present > 0 & perc_present < 1) %>%
+  ungroup() %>%
+  filter(Keep) %>%
+  
+  group_by(age_group, antibody) %>%
+  
+  # for regular linear models
+  do(tidy(lm(median_dysbiosis ~ present, data=.))) %>%
+  #do(tidy_lm_posthoc(lm(alpha ~ study_group_collapse_control, data=.), "study_group_collapse_control")) %>%
+  
+  # for linear mixed effects models
+  #do(tidy(nlme::lme(alpha ~ study_group, random=~1|subject_id, data=., na.action=na.omit), effect="fixed")) %>%
+  #do(tidy_lm_posthoc(nlme::lme(alpha ~ study_group, random=~1|subject_id, data=., na.action=na.omit), "study_group")) %>%
+  
+  ungroup() %>%
+  
+  filter(!grepl("Intercept|Residuals", term)) %>%
+  mutate(term = sub("study_group_death", "Death - ", term)) %>%
+  mutate(term = sub("present", "Absent - ", term)) %>%
+  #mutate(term = sub("age_group", "0-5 months - ", term)) %>%
+  
+  group_by(term, age_group) %>%
+  mutate(fdr = p.adjust(p.value, method="BH")) %>%
+  ungroup()
+
+summaries_df %>%
+  filter(p.value < 0.05) %>%
+  kable_style(fdr, 0.1)
+  
+```
+
+
+
+## Correlation with relative abundance
+
+```{r}
+
+
+antibody_Hflu <- antibody_bugs %>%
+  filter(antibody %in% "H. influenzae") %>%
+  left_join(props_toTest_npop %>% 
+              filter(Taxa %in% "Pseudomonadota Haemophilus influenzae") %>%
+              select(subject_id, Taxa, props, props_log),
+            by="subject_id"
+  )
+  
+
+
+antibody_Hflu %>%
+  ggplot(aes(x=value, y=props, color=study_group_death)) +
+    geom_point() +
+    geom_smooth(method="lm") +
+    scale_y_continuous(trans="log10", labels=scales:::percent) +
+    scale_x_continuous(trans="log10") +
+    scale_color_manual(values=ann_colors$study_group_death) +
+    facet_wrap(~age_group, scales="free_x", ncol=4) +
+    theme_clean() +
+    labs(
+      x="Antibodies against H. flu", color="",
+      y="Relative abundance"
+    )
+ggsave("perch_Hflu_relAb_antibody.pdf", height=2.5, width=8, useDingbats=F)
+```
+
+Linear model between relative abundance and antibodies against H flu
+
+```{r}
+antibody_Hflu %>%
+  group_by(age_group, study_group_death) %>%
+  do(tidy(lm(props_log ~ value_log, data=.))) %>%
+  ungroup() %>%
+  filter(!grepl("Intercept", term)) %>%
+  group_by(age_group) %>%
+  mutate(fdr = p.adjust(p.value, method="BH")) %>%
+  ungroup() %>%
+  pander(split.table=Inf, digits=2)
+```
+
+
+```{r}
+antibody_Hflu %>%
+  group_by(age_group, study_group_death) %>%
+  do(tidy(cor.test(.$props_log, .$value_log, method="spearman"))) %>%
+  ungroup() %>%
+  #filter(!grepl("Intercept", term)) %>%
+  group_by(age_group) %>%
+  mutate(fdr = p.adjust(p.value, method="BH")) %>%
+  ungroup() %>%
+  select(-method) %>%
+  pander(split.table=Inf, digits=2)
+
+
+
+```
+
+
+
+## Fig 4D: Look into RSV specifically
+
+```{r fig.width=8}
+antibody_toTest %>%
+  filter(antibody_category %in% "RSV") %>%
+  mutate(pathogen_clean = fct_relabel(pathogen_clean, function(x) gsub(" ", "\n", x))) %>%
+  ggplot(aes(x=pathogen_clean, y=value, color=study_group_death)) +
+    geom_boxplot(outlier.alpha = 0) +
+    geom_quasirandom(dodge.width=0.75) +
+    scale_color_manual(values=ann_colors$study_group_death) +
+    facet_grid(age_group ~ antibody) +
+    theme_clean() +
+    labs(
+      x="Etiology",
+      color=""
+    )
+```
+
+```{r}
+antibody_toTest %>%
+  filter(antibody_category %in% "RSV") %>%
+  ggplot(aes(x=value, fill=study_group_death, alpha=isDeath)) +
+    geom_density(alpha=0.9) +
+    facet_wrap(~age_group, ncol=4) +
+    scale_fill_manual(values=ann_colors$study_group_death) +
+    scale_alpha_manual(values=c(0.4,0.9)) +
+    theme_clean() +
+    #theme(aspect.ratio = 1.25) +
+    guides(alpha="none") +
+    labs(
+      y="", fill="",
+      x=""
+    )
+ggsave("perch_Fig4D_RSV_antibody.pdf", height=2.4, width=10, useDingbats=F)
+```
+
+
+## Look into vaccination status
+
+```{r}
+vaccine_of_interest <- data_frame(
+  antibody = c("Measles Nucleoprotein", "Mumps Nucleoprotein", "Rubella E1", "H. influenzae", "Bordetella pertusis (Adenylate Cyclase)", "Bordetella pertusis (Pertactin autotransporter protein)"),
+  vaccine = c("vaccine_Measles", "vaccine_Measles", "vaccine_Measles", "vaccine_Hflu", "vaccine_DPT", "vaccine_DPT")
+)
+
+antibody_vaccine <- antibody_toTest %>%
+  select(SampleID, subject_id, study_group_death, age_group, antibody, panel, antibody_category, value, starts_with("vaccine")) %>%
+  pivot_longer(cols=starts_with("vaccine"), names_to = "vaccine", values_to="vaccine_status") %>%
+  right_join(vaccine_of_interest, by=c("antibody", "vaccine")) %>%
+  mutate(vaccine_status = fct_collapse(vaccine_status, 
+                                       `Fully vaccinated`=c("Fully vaccinated", "Fully vaccinated (>= 1 dose)"),
+                                       `Not vaccinated`=c("Not vaccinated (0 doses)", "Not vaccinated", "Too young to be vaccinated (any child < 10 months [10.5 months in Bangladesh] not vaccinated)"),
+                                       `Partially vaccinated`=c("Partially vaccinated", "Partially vaccinated (1 or 2 doses)"))) %>%
+  mutate(vaccine_status = factor(vaccine_status, levels=c("Not vaccinated", "Partially vaccinated", "Fully vaccinated"))) %>%
+  mutate(value_orj = value) %>%
+  mutate(value = ifelse(value==0, 0.1, value)) %>%
+  mutate(value_log = log10(value))
+  
+```
+
+```{r fig.height=8, fig.width=15}
+antibody_vaccine %>%
+  ggplot(aes(x=age_group, y=value, color=vaccine_status)) +
+    geom_boxplot(outlier.alpha=0) +
+    geom_quasirandom(dodge.width=0.75) +
+    facet_wrap(~antibody) +
+    scale_y_continuous(trans="log10") +
+    guides(color = guide_legend(ncol = 1))+
+    theme_clean() +
+    theme(
+      legend.position = "bottom"
+    )
+```
+
+
+```{r fig.height=10, fig.width=15}
+antibody_vaccine %>%
+  mutate(study_group_death = fct_relabel(study_group_death, function(x) gsub(" ", "\n", x))) %>%
+  ggplot(aes(x=study_group_death, y=value, color=vaccine_status)) +
+    geom_boxplot(outlier.alpha=0) +
+    geom_quasirandom(dodge.width=0.75) +
+    facet_grid(age_group~antibody) +
+    guides(color = guide_legend(ncol = 1))+
+    theme_clean() +
+    theme(
+      legend.position = "bottom"
+    )
+```
+
+
+
+```{r }
+antibody_vaccine %>%
+  filter(vaccine %in% "vaccine_Hflu") %>%
+  mutate(study_group_death = fct_relabel(study_group_death, function(x) gsub(" ", "\n", x))) %>%
+  ggplot(aes(x=study_group_death, y=value, color=vaccine_status)) +
+    geom_boxplot(outlier.alpha=0) +
+    geom_quasirandom(dodge.width=0.75) +
+    facet_wrap(~age_group, ncol=4) +
+    scale_color_viridis(option="mako", discrete=T, end=0.7) +
+    guides(color = guide_legend(nrow = 1)) +
+    theme_clean() +
+    theme(
+      legend.position = "bottom",
+      #aspect.ratio = 1.25
+    ) +
+    labs(
+      x="",
+      y="Antibody levels against\nH. influenzae"
+    )
+ggsave("perch_Fig4E_Hflu_antibody.pdf", height=3, width=8, useDingbats=F)
+```
+
+
+For each age group: value ~ study_group_death
+
+All the tests are done with the "death" group as the reference
+
+```{r}
+summaries_df <- antibody_vaccine %>%
+  #filter(age_group != "0-5 months") %>%
+  filter(!(age_group %in% "0-5 months" & vaccine %in% "vaccine_Measles")) %>%
+  
+  mutate(study_group_death = fct_relevel(study_group_death, "Death", after=0)) %>%
+  
+  group_by(age_group, antibody) %>%
+  
+  # for regular linear models
+  do(tidy(lm(value_log ~ vaccine_status + study_group_death, data=.))) %>%
+  #do(tidy_lm_posthoc(lm(alpha ~ study_group_collapse_control, data=.), "study_group_collapse_control")) %>%
+  
+  # for linear mixed effects models
+  #do(tidy(nlme::lme(alpha ~ study_group, random=~1|subject_id, data=., na.action=na.omit), effect="fixed")) %>%
+  #do(tidy_lm_posthoc(nlme::lme(alpha ~ study_group, random=~1|subject_id, data=., na.action=na.omit), "study_group")) %>%
+  
+  ungroup() %>%
+  
+  filter(!grepl("Intercept|Residuals", term)) %>%
+  mutate(term = sub("study_group_death", "Death - ", term)) %>%
+  #mutate(term = sub("age_group", "0-5 months - ", term)) %>%
+  
+  group_by(term, age_group) %>%
+  mutate(fdr = p.adjust(p.value, method="BH")) %>%
+  ungroup()
+
+#summaries_df %>%
+#  select(-statistic) %>%
+#  kable_style(fdr, 0.1)
+```
+
+
+
+```{r fig.width=10, fig.height=7}
+
+summaries_df %>%
+  mutate(estimate = -estimate) %>%
+  mutate(term = sub("Death - ", "", term)) %>%
+  
+  group_by(antibody) %>%
+  mutate(num_sig = any(fdr<0.1)) %>%
+  ungroup() %>%
+  filter(num_sig) %>%
+  
+  mutate(antibody = reorder(antibody, -estimate)) %>%
+  mutate(isSig = ifelse(fdr < 0.1, "q<0.1", "q>0.1")) %>%
+  
+  ggplot(aes(x=estimate, y=antibody, color=term, shape=isSig)) +
+    geom_vline(xintercept=0, linetype=2) +
+    geom_pointrange(aes(xmin=estimate-std.error, xmax=estimate+std.error), position = position_dodge(width = 0.5)) +
+    scale_shape_manual(values=c(16,1)) +
+    #scale_color_brewer(palette="Set1") +
+    #scale_color_manual(values=ann_colors$study_group_collapse_control) +
+    facet_grid(.~age_group, space="free", scales="free") +
+    theme_clean() +
+    theme(
+      strip.text.y = element_text(angle = 0)
+    ) +
+    labs(
+      x="Log difference between groups",
+      y="", color="", shape=""
+    )
+```
+
+
+
+Now we are excluding the subjects who died.
+
+For each age group: value_log ~ study_group_death
+
+```{r}
+summaries_df <- antibody_vaccine %>%
+  
+  filter(!(age_group %in% "0-5 months" & vaccine %in% "vaccine_Measles")) %>%
+  
+  filter(!study_group_death %in% "Death") %>%
+  
+  group_by(age_group, antibody, panel) %>%
+  
+  # for regular linear models
+  #do(tidy(lm(value ~ study_group_death, data=.))) %>%
+  do(tidy_lm_posthoc(lm(value_log ~ vaccine_status + study_group_death, data=.), "study_group_death")) %>%
+  
+  # for linear mixed effects models
+  #do(tidy(nlme::lme(alpha ~ study_group, random=~1|subject_id, data=., na.action=na.omit), effect="fixed")) %>%
+  #do(tidy_lm_posthoc(nlme::lme(alpha ~ study_group, random=~1|subject_id, data=., na.action=na.omit), "study_group")) %>%
+  
+  ungroup() %>%
+  
+  filter(!grepl("Intercept|Residuals", term)) %>%
+  #mutate(term = sub("study_group_death", "Death - ", term)) %>%
+  #mutate(term = sub("age_group", "0-5 months - ", term)) %>%
+  
+  group_by(term, age_group) %>%
+  mutate(fdr = p.adjust(p.value, method="BH")) %>%
+  ungroup()
+
+#summaries_df %>%
+#  select(-statistic) %>%
+#  kable_style(fdr, 0.1)
+```
+
+
+
+```{r fig.width=10, fig.height=3}
+
+summaries_df %>%
+  
+  filter(!is.na(estimate)) %>%
+  #filter(grepl("Control", term)) %>%
+  #droplevels() %>%
+  
+  group_by(antibody) %>%
+  mutate(num_sig = any(fdr<0.1)) %>%
+  ungroup() %>%
+  filter(num_sig) %>%
+  
+  mutate(antibody = reorder(antibody, estimate)) %>%
+  mutate(isSig = ifelse(fdr < 0.1, "q<0.1", "q>0.1")) %>%
+  
+  ggplot(aes(x=estimate, y=antibody, color=term, shape=isSig)) +
+    geom_vline(xintercept=0, linetype=2) +
+    geom_pointrange(aes(xmin=estimate-std.error, xmax=estimate+std.error), position = position_dodge(width = 0.5)) +
+    scale_shape_manual(values=c(16,1)) +
+    scale_color_brewer(palette="Set1") +
+    #scale_color_manual(values=ann_colors$age_group) +
+    facet_wrap(~age_group, ncol=4) +
+    theme_clean() +
+    theme(
+      strip.text.y = element_text(angle = 0)
+    ) +
+    labs(
+      x="Log difference between groups",
+      y="", color="", shape=""
+    )
+#ggsave("perch_Fig4D_diffAb_2.pdf", height=2.5, width=6.5, useDingbats=F)
+```
+
+
+# Figure 5: Summary
+
+```{r fig.height=10}
+
+
+
+fig5_props <- props_toTest_npop %>%
+  select(SampleID, props, Taxa) %>%
+  filter(Taxa %in% c("Pseudomonadota Haemophilus influenzae",
+                     "Pseudomonadota Enterobacteriaceae",
+                     "Bacillota Streptococcus lactarius",
+                     "Bacillota Streptococcus parasanguinis",
+                     "Bacillota Streptococcus thermophilus",
+                     "Bacillota Streptococcus vestibularis",
+                     "Bacteroidota Prevotella histicola",
+                     "Actinomycetota Bifidobacterium longum"
+                     )) %>%
+  mutate(taxa_group = ifelse(grepl("Streptococcus", Taxa), "BF associated", Taxa)) %>%
+  group_by(SampleID, taxa_group) %>%
+  summarize(props = sum(props)) %>%
+  ungroup() %>%
+  pivot_wider(names_from="taxa_group", values_from="props")
+
+fig5_antibody <- antibody_toTest %>%
+  select(ParticipantID=subject_id, antibody, value) %>%
+  filter(antibody %in% "RSV-F Protein") %>%
+  select(ParticipantID, `RSV antibody`=value)
+
+s_npop %>%
+  mutate(study_group = fct_collapse(study_group_death, Pneumonia=c("Severe case", "Very severe case"))) %>%
+  select(SampleID, ParticipantID, study_group, age_months, Shannon, Dysbiosis=median_dysbiosis) %>%
+  left_join(fig5_props, by="SampleID") %>%
+  left_join(fig5_antibody, by="ParticipantID") %>%
+  pivot_longer(cols=Shannon:`RSV antibody`, names_to="variable") %>%
+  mutate(variable = gsub(" ", "\n", variable)) %>%
+  mutate(variable = factor(variable)) %>%
+  mutate(variable = fct_relevel(variable, "BF\nassociated", after=0)) %>%
+  mutate(variable = fct_relevel(variable, "Dysbiosis", after=0)) %>%
+  mutate(variable = fct_relevel(variable, "Shannon", after=0)) %>%
+  ggplot(aes(x=age_months, y=value, color=study_group)) +
+    geom_smooth() +
+    #geom_point() +
+    facet_grid(variable~., scales="free") +
+    theme_clean() +
+    theme(
+      strip.text.y = element_text(angle = 0)
+    )
+
+ggsave("perch_Fig5.pdf", height=10, width=8, useDingbats=F)
+```
+
+
+# Contig analysis
+
+```{r}
+data_contig <- file.path(data_dir, "perch_assembly_data")
+
+kraken_dir <- file.path(data_contig, "kraken")
+bakta_dir <- file.path(data_contig, "bakta")
+bakta_dir2 <- file.path(data_contig, "bakta_contigs")
+```
+
+```{r}
+s_toTest <- s_npop
+```
+
+
+
+
+```{r eval=F}
+## kraken contig information
+kraken_results <- s_toTest %>%
+  select(SampleID) %>%
+  mutate(FileName = file.path(kraken_dir, paste0(SampleID, "-raw.tsv"))) %>%
+  group_by(FileName) %>%
+  mutate(fileSize = file.info(FileName)$size) %>%
+  ungroup() %>%
+  filter(fileSize > 30) %>% # delete empty files
+  group_by(SampleID, FileName) %>%
+  #do(read.delim(file.path(kraken_dir, .$FileName), stringsAsFactors = F, sep='\t')) %>%
+  do(read_delim(.$FileName, delim='\t', col_names=F, col_types="ccddc")) %>%
+  ungroup() %>%
+  #mutate(SampleID = sub("-raw.tsv", "", FileName, perl=T)) %>%
+  #mutate(SampleID = sub(kraken_dir, "", SampleID)) %>%
+  select(-FileName) %>%
+  select(-X5) %>%
+  setNames(c("SampleID", "Classified", "contig", "taxid", "contig_length"))
+
+library(taxonomizr)
+taxa <- unique(kraken_results$taxid)
+taxonomy <- getTaxonomy(taxa,'/Users/tanesc/Documents/DBs/taxonomizr/20240325_taxonomizr/accessionTaxa.sql')
+taxonomy <- as.data.frame(taxonomy) %>%
+  select(-domain) %>%
+  mutate(taxid = as.numeric(rownames(taxonomy)))
+
+
+kraken_results <- kraken_results %>%
+  left_join(taxonomy, by="taxid")
+```
+
+
+
+```{r eval=F}
+## contig coverage information
+contig_coverage_all <- data_frame(FileName = list.files(
+  data_contig, pattern="contigs_coverage.txt")) %>%
+  group_by(FileName) %>%
+  do(read.delim(file.path(data_contig, .$FileName), stringsAsFactors = F, sep=',')) %>%
+  ungroup() %>%
+  #mutate(SampleID = sub("_1.txt", "", FileName, perl=T)) %>%
+  select(-FileName)
+
+contig_coverage <- contig_coverage_all %>%
+  rename(SampleID=sample) %>%
+  filter(SampleID %in% s_toTest$SampleID)
+```
+
+
+```{r eval=F}
+## bakta results
+bakta_contigs <- s_toTest %>%
+  select(SampleID) %>%
+  mutate(FileName = file.path(bakta_dir2, paste0(SampleID, ".contigs.tsv"))) %>%
+  group_by(FileName) %>%
+  mutate(fileSize = file.info(FileName)$size) %>%
+  ungroup() %>%
+  filter(fileSize > 0) %>% # delete empty files
+  group_by(SampleID, FileName) %>%
+  do(read_delim(.$FileName, delim='\t', col_names = F, col_types="cc")) %>%
+  ungroup() %>%
+  #mutate(SampleID = sub(".contigs.tsv", "", FileName, perl=T)) %>%
+  select(-FileName) %>%
+  setNames(c("SampleID", "contig_bakta", "contig"))
+
+
+bakta_results <- s_toTest %>%
+  select(SampleID) %>%
+  mutate(FileName = file.path(bakta_dir, paste0(SampleID, ".tsv"))) %>%
+  group_by(FileName) %>%
+  mutate(fileSize = file.info(FileName)$size) %>%
+  ungroup() %>%
+  filter(fileSize > 30) %>% # delete empty files
+  group_by(SampleID, FileName) %>%
+  #do(read.delim(file.path(bakta_dir, .$FileName), stringsAsFactors = F, sep='\t')) %>%
+  do(read_delim(.$FileName, delim='\t', skip=5, col_types="ccddcccc")) %>%
+  ungroup() %>%
+  #mutate(SampleID = sub(".tsv", "", FileName, perl=T)) %>%
+  select(-FileName) %>%
+  rename(contig_bakta = "#Sequence Id") %>%
+  select(SampleID, everything()) %>%
+  left_join(bakta_contigs, by=c("SampleID", "contig_bakta"))
+
+
+
+```
+
+
+```{r eval=F}
+## to calculate RPKM from coverage we would do
+## reads / (length/1000) / (nonhost/10^6)
+## (coverage*length/125) / (length/1000) / (nonhost/10^6)
+## (coverage*length/125) * (10^9/(length*nonhost))
+## (coverage /nonhost) * (10^9/125)
+
+bakta_rpkm <- bakta_results %>%
+  #filter(Gene %in% genes_of_interest_names) %>%
+  left_join(contig_coverage, by=c("SampleID", "contig")) %>%
+  left_join(kraken_results, by=c("SampleID", "contig")) %>%
+  left_join(select(s_toTest, SampleID, nonhost), by="SampleID") %>%
+  mutate(RPKM = mean / nonhost) %>%
+  mutate(RPKM = RPKM * 10^9 / 125)
+```
+
+
+```{r eval=F}
+contig_coverage %>%
+  left_join(kraken_results, by=c("SampleID", "contig")) %>%
+  filter(family %in% "Enterobacteriaceae") %>%
+  #filter(genus %in% "Haemophilus") %>%
+  group_by(SampleID, species) %>%
+  summarize(mean = mean(mean)) %>%
+  ungroup() %>%
+  right_join(select(s_toTest, "SampleID"), by="SampleID") %>%
+  
+  mutate(mean = ifelse(mean==0 | is.na(mean), 0.01, mean)) %>%
+  
+  left_join(select(s_toTest, SampleID, study_group_death, age_group), by="SampleID") %>%
+  ggplot(aes(x=study_group_death, y=mean)) +
+    geom_boxplot(outlier.alpha = 0) +
+    geom_quasirandom() +
+    scale_y_continuous(trans="log10") +
+    facet_wrap(~age_group) +
+    theme_clean()
+```
+
+
+```{r}
+# find the samples with high levels of Enterobacteriacea and check the contigs for those samples
+
+high_entero_samples <- summed_props %>%
+  as.data.frame() %>% 
+  rownames_to_column("Taxa") %>% 
+  pivot_longer(-Taxa, names_to="SampleID", values_to="props") %>%
+  filter(Taxa %in% "Pseudomonadota Enterobacteriaceae") %>%
+  right_join(select(s, SampleID, nonhost, study_group, death, sample_type), by="SampleID") 
+
+high_entero_samples %>%
+  filter(props > 0.1)
+  pander(split.table=Inf, digits=2)
+  pull(SampleID)
+
+
+
+
+
+  
+```
+
+```{r eval=F}
+contig_coverage %>%
+  left_join(kraken_results, by=c("SampleID", "contig")) %>%
+  filter(family %in% "Enterobacteriaceae") %>%
+  #filter(genus %in% "Haemophilus") %>%
+  group_by(SampleID, species) %>%
+  summarize(mean = mean(mean)) %>%
+  ungroup() %>%
+  #filter(!is.na(species)) %>%
+  right_join(high_entero_samples, by="SampleID") %>%
+  arrange(-props, -mean) %>%
+   View()
+  #right_join(select(s_toTest, "SampleID"), by="SampleID") %>%
+  
+  mutate(mean = ifelse(mean==0 | is.na(mean), 0.01, mean)) %>%
+  
+  left_join(select(s_toTest, SampleID, study_group_death, age_group), by="SampleID") %>%
+  ggplot(aes(x=study_group_death, y=mean)) +
+    geom_boxplot(outlier.alpha = 0) +
+    geom_quasirandom() +
+    scale_y_continuous(trans="log10") +
+    facet_wrap(~age_group) +
+    theme_clean()
+```
+

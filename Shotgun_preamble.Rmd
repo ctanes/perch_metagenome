@@ -1,0 +1,485 @@
+
+```{r, message=FALSE, warning=FALSE}
+library(tidyverse)
+library(qiimer)
+library(vegan)
+library(ape)
+library(usedist)
+
+## Visualization packages
+library(pander)
+library(kableExtra)
+
+library(pheatbuilder)
+library(ggbeeswarm)
+library(ggsci)
+library(viridis)
+library(wesanderson)
+library(RColorBrewer)
+
+# stats packages
+library(adonisplus)
+library(nlme)
+library(emmeans) # for lmer post-hoc tests
+library(broom.mixed)
+```
+
+```{r}
+se <- function(x) sd(x)/sqrt(length(x))
+
+logit <- function(x) { log(x / (1-x)) }
+
+p_stars <- function (pvals) {
+  cut(pvals, breaks = c(-Inf, 0.001, 0.01, 0.05, 0.1, Inf), labels = c("***", "**", "*", "+", ""))
+}
+
+tidy_lm_posthoc <- function(lmer_test, term_string) {
+  form1 <- as.formula(paste("pairwise ~", term_string))
+  mod <- anova(lmer_test)
+  
+  if(class(lmer_test) == "lm") {
+    main_tidy <- tidy(mod)
+  } else {
+    main_tidy <- data.frame(term = rownames(mod), mod, row.names=NULL) %>% 
+      rename(df=numDF)
+  }
+  
+  bind_rows(main_tidy,
+            data.frame(emmeans(lmer_test, form1, adjust="tukey")$contrasts) %>% rename(term = contrast, std.error=SE)
+            ) %>%
+    mutate(estimate = estimate * -1) %>%
+    select(term, df, estimate, std.error,  p.value) ## can also add statistic and t.ratio columns if needed
+}
+
+theme_clean <- function(){ 
+    theme_bw() %+replace%    #replace elements we want to change
+    theme(
+      panel.grid = element_blank(), 
+      strip.background = element_blank()
+    )
+}
+
+theme_clean_pcoa <- function(){ 
+    theme_bw() %+replace%    #replace elements we want to change
+    theme(
+      axis.text=element_blank(),
+      axis.ticks=element_blank(),
+      panel.grid = element_blank(), 
+      aspect.ratio = 1,
+      strip.background = element_blank()
+    )
+}
+
+kable_style <- function(data, col_name=p.value, threshold=0.05) {
+  
+  row_num <- nrow(data)
+  
+  ##substitute underscore with escaped underscores and remove na in p.value columns
+  data_return <- data %>%
+    select_all(~gsub("_", "\\\\_", .)) %>% ##need to escape the escape
+    select_all(~gsub("#", "\\\\#", .)) %>% ##need to escape the escape
+    mutate_if(function(x) is.character(x) | is.factor(x), ~gsub("_", " ", .)) %>%
+    mutate_if(function(x) is.character(x) | is.factor(x), ~gsub("%", "\\\\%", .))
+  
+  ## highlight significant values
+  col_name <- enquo(col_name)
+  data_return <- data_return %>%
+    mutate(!!col_name := cell_spec(signif(!!col_name, 2), "latex", bold = !!col_name<threshold))
+  
+  ##if Taxa is a column in the dataframe
+  if(sum(grepl("Taxa", colnames(data_return))) > 0)  {
+    data_return <- data_return %>%
+      mutate(Taxa = gsub("[pcofgs]__", "", Taxa))
+  }
+  
+  # ... should be column number
+  if (row_num > 15) {
+    data_return <- data_return %>%
+      kable("latex", longtable = T, digits=2, booktabs=T, escape=F, linesep='') %>%
+      kable_styling(latex_options = c("repeat_header", "HOLD_position"), font_size = 7) %>%
+      row_spec(0, bold = T, color="#7C0A02") #%>%
+      #collapse_rows(columns = 1, valign = "top") 
+    
+  }
+  else {
+    data_return <- data_return %>%
+      kable("latex", longtable = F, digits=2, booktabs=T, escape=F) %>%
+      kable_styling(latex_options = c("scale_down", "repeat_header", "HOLD_position")) %>%
+      row_spec(0, bold = T, color="#7C0A02")
+    
+    if(row_num > 1) { ##always collapse row unless there is only 1 row
+      data_return <- data_return %>%
+        collapse_rows(columns = 1, valign = "top")
+    }
+  }
+  
+  return(data_return)
+  
+}
+
+
+```
+
+```{r}
+data_dir <- "Data"
+
+### minimum QC read count threshold
+min_reads <- 10000
+
+### number of permutations for the PERMANOVA test
+perm <- 99 ## The number of permutations to do for PERMANOVA. You can start with 99 permutations to run faster while developing the code, then change it to 999 permutations for higher resolution.
+
+### rarefying subsample size 
+richness_subsample_size <- 1000
+
+### mapping file path
+mapping_file_fp <- file.path(data_dir, "20260313_Mali_PERCH_mapping_file.tsv")
+
+### preprocess summary results filepath
+preprocess_fp <- file.path(data_dir, "preprocess_summary.tsv")
+
+### read quality
+fastqc_fp = file.path(data_dir, 'fastqc_quality.tsv')
+
+### taxonomic assignment 
+feature_table_fp <- file.path(data_dir, "all_samples.tsv")
+```
+
+```{r}
+total_reads <- data_frame(FileName = list.files(data_dir, pattern="total_reads_L00*")) %>%
+  group_by(FileName) %>%
+  do(read_delim(file.path(data_dir, .$FileName))) %>%
+  ungroup() %>%
+  group_by(SampleID) %>%
+  summarize(sample_total_reads = sum(NumReads)) %>%
+  ungroup() 
+```
+
+
+```{r}
+## Check if any samples did not demultiplex and alert the lab
+## This makes a table in the QC report if there are any samples that demux'd 0 reads
+## requires importing the mapping file with the "sample_total_reads" column
+demuxFail_samples <- read.delim(mapping_file_fp) %>%
+  left_join(total_reads, by="SampleID") %>%
+  mutate(SampleID = as.character(SampleID),
+         sample_type = SampleType, ng_ul = library_ng_ul, barcode = paste(barcode_index_set, barcode_coord)) %>%
+  filter(sample_total_reads == 0) %>%
+  select(SampleID, barcode, ng_ul) %>%
+  arrange(ng_ul)
+
+if (nrow(demuxFail_samples) > 0) {
+  pander(demuxFail_samples, caption = "The following samples yielded zero reads at demultiplexing.")
+}
+```
+
+```{r sample_sheet_import, echo=FALSE}
+preprocess <- read.delim(preprocess_fp) %>%
+  rename(SampleID = Samples)
+
+s <- read.delim(mapping_file_fp) %>%
+  mutate(SampleID = as.character(SampleID), subject_id = as.character(ParticipantID), sample_type = SampleType) %>%
+  mutate(isControl = grepl("extractempty|extractblank|EBneg|vibriolambda|mockdna|dnafreewater", SampleID, ignore.case = T)) %>%
+  mutate(isControl = SampleType %in% c("Extraction negative", "Library negative", "Library positive")) %>%
+  left_join(total_reads, by="SampleID") %>%
+  left_join(preprocess, by="SampleID") %>%
+  filter(!sample_type %in% c("library positive")) %>%
+  
+  mutate(bf_current = ifelse(bf_duration < age_months, "no BF", "BF")) %>%
+  mutate(bf_current = fct_rev(factor(bf_current))) %>%
+  
+  select(-current_abx) %>% ## This is not the correct column for abx
+  rename(current_abx = abx_new) ## Changing the correct abx column name to current_abx
+```
+
+
+```{r}
+## read in etiology data
+etiology_all <- read.table("Data/PERCH_All HIV- Cases_IPP_gammalsaf.csv", sep=",", header=T) %>%
+  filter(site %in% "M") %>%
+  select(-all_of(c("X", "site"))) %>%
+  rename(subject_id = Patid) %>%
+  mutate(subject_id = sub("M", "p_m", subject_id)) %>%
+  pivot_longer(-subject_id, names_to="pathogen", values_to="probability")
+
+etiology_entropy <- etiology_all %>%
+  mutate(probability = ifelse(probability==0, 1e-8, probability)) %>%
+  group_by(subject_id) %>%
+  summarize(entropy = -sum(probability * log2(probability)))
+
+etiology_all_xray <- read.table("Data/PERCH_CXR+ HIV- Cases_IPP_gammalsaf.csv", sep=",", header=T) %>%
+  filter(site %in% "M") %>%
+  select(-all_of(c("X", "site"))) %>%
+  rename(subject_id = patid) %>%
+  mutate(subject_id = sub("M", "p_m", subject_id)) %>%
+  pivot_longer(-subject_id, names_to="pathogen", values_to="probability")
+
+
+etiology_clean <- etiology_all %>%
+  arrange(-probability) %>%
+  group_by(subject_id) %>%
+  slice(1) %>%
+  ungroup() %>%
+  mutate(etiology_40 = probability > 0.4) %>%
+  mutate(etiology_40 = ifelse(etiology_40, pathogen, "Unknown")) %>%
+  mutate(etiology_75 = probability > 0.75) %>%
+  mutate(etiology_75 = ifelse(etiology_75, pathogen, "Unknown"))
+```
+
+
+
+```{r eval=F}
+# figure out the breastfeeding information
+s %>% select(subject_id, bf_current) %>% unique()  %>% pull(bf_current) %>% table()
+```
+
+
+```{r}
+## Check if there are any samples with no reads and remove them from the 
+## sample sheet so it doesn't mess with the rest of the code.
+noRead_samples <- s %>%
+  mutate(ng_ul = library_ng_ul, barcode = paste(barcode_index_set, barcode_coord)) %>%
+  filter(both_kept < 5) %>%
+  select(SampleID, sample_type, barcode, ng_ul) %>%
+  arrange(sample_type, ng_ul)
+
+if (nrow(noRead_samples) > 0) {
+  pander(noRead_samples, caption = "The samples that yielded less than 5 reads after quality control steps were removed from the reports.")
+}
+
+s <- s %>%
+  filter(both_kept >= 5)
+```
+
+
+
+```{r}
+o <- read_qiime_otu_table(feature_table_fp, commented=F)
+
+counts <- o$counts
+colnames(counts) <- sub("\\.taxa$", "", colnames(counts))
+counts <- counts[,s$SampleID]
+
+ta <- o$metadata %>%
+  enframe("Taxid", "Taxon") %>%
+  mutate(Taxon = str_remove(Taxon, "(; [kpcofgs]__)+$")) %>%
+  mutate(Taxon = gsub("[kpcofgs]__", "", Taxon)) 
+
+adf <- split_assignments(ta$Taxon) #%>%
+  #mutate(Species = ifelse(!is.na(Genus) & !is.na(Species), paste(Genus, Species), NA))
+rownames(adf) <- ta$Taxid
+rm(ta)
+
+# Delete human contamination and emp
+is_human <- grepl("Chordata", adf$Phylum)
+is_virus <- grepl("Viruses", adf$Kingdom)
+is_empty <- rowSums(counts) == 0
+taxa_to_delete = is_human | is_empty | is_virus
+adf <- adf[!taxa_to_delete,]
+counts <- counts[!taxa_to_delete,]
+rm(is_human, is_empty, is_virus, taxa_to_delete)
+
+a <- simplify_assignments(adf, rank1 = "Phylum", rank2="Species")
+
+summed_cts <- rowsum(counts, a) 
+summed_props <- sweep(summed_cts, 2, colSums(summed_cts), "/")
+
+a_g <- simplify_assignments(adf, rank1="Phylum", rank2="Genus")
+summed_cts_g <- rowsum(counts, a_g) 
+summed_props_g <- sweep(summed_cts_g, 2, colSums(summed_cts_g), "/")
+
+
+a_f <- simplify_assignments(adf, rank1="Phylum", rank2="Family")
+summed_cts_f <- rowsum(counts, a_f) 
+summed_props_f <- sweep(summed_cts_f, 2, colSums(summed_cts_f), "/")
+
+s <- merge(s, data.frame(kraken_counts= colSums(summed_cts)), by.x="SampleID", by.y="row.names", all.x=T)
+```
+
+
+
+```{r}
+## contaminating genera
+contamination_taxa <- summed_props_g %>%
+  as.data.frame() %>% 
+  rownames_to_column("Taxa") %>% 
+  pivot_longer(-Taxa, names_to="SampleID", values_to="props") %>%
+  right_join(dplyr::select(s, SampleID, SampleType, library_ng_ul, nonhost, kraken_counts), by="SampleID")  %>%
+  filter(SampleType %in% c("Extraction negative", "Library negative")) %>%
+  group_by(Taxa) %>%
+  summarize(mean_prop = mean(props)) %>%
+  ungroup() %>%
+  filter(mean_prop > 0.1)
+
+props_contam <- summed_props_g %>%
+  as.data.frame() %>% 
+  rownames_to_column("Taxa") %>% 
+  pivot_longer(-Taxa, names_to="SampleID", values_to="props") %>%
+  filter(Taxa %in% contamination_taxa$Taxa) %>%
+  
+  group_by(SampleID) %>%
+  summarize(props_contamination = sum(props)) %>%
+  ungroup()
+
+
+s <- left_join(s, props_contam, by="SampleID") %>%
+  mutate(Keep = kraken_counts > min_reads & props_contamination < 0.02713153)
+```
+
+
+```{r alpha}
+richness <- rarefy(t(counts), richness_subsample_size) %>%
+  enframe("SampleID", "Richness")
+  
+shannon <- diversity(t(counts)) %>%
+  enframe("SampleID", "Shannon")
+
+
+
+s <- s %>%
+  left_join(richness, by="SampleID") %>%
+  left_join(shannon, by="SampleID") %>%
+  left_join(enframe(diversity(t(counts), index = "simpson"), "SampleID", "Simpson"))
+
+rm(richness, shannon)
+```
+
+```{r beta}
+bc <- vegdist(t(summed_props), method="bray", binary=F) # Bray-Curtis
+#jd <- vegdist(t(summed_props), method="jaccard", binary=T) # Jaccard
+jd <- vegdist(rrarefy(t(summed_cts), 10000), method="jaccard", binary=T) # Jaccard
+#so <- vegdist(t(summed_props), method="bray", binary=T) # Sorensen
+
+```
+
+
+```{r}
+## calculate dysbiosis score
+dysbiosis_score <- as.matrix(dist_subset(bc, s$SampleID)) %>%
+  as_tibble(rownames = "Var1") %>%
+  pivot_longer(-Var1, names_to="Var2", values_to="distance") %>%
+  left_join(select(s, Var1=SampleID, study_group, subject_id), by="Var1") %>%
+  left_join(select(s, Var2=SampleID, study_group, subject_id), by="Var2") %>%
+  filter(study_group.x == "Control without RTI") %>%
+  filter(!is.na(study_group.y)) %>%
+  filter(subject_id.x != subject_id.y) %>%
+  group_by(Var2, study_group.y) %>%
+  summarize(mean_dysbiosis = mean(distance), median_dysbiosis = median(distance)) %>%
+  ungroup() %>%
+  rename(SampleID = Var2)
+
+dysbiosis_score <- dysbiosis_score %>%
+  mutate(dysbiosis_90 = ifelse(median_dysbiosis > quantile(filter(dysbiosis_score, study_group.y == "Control without RTI")$median_dysbiosis, 0.9), "dysbiosis", "non-dysbiotic")) %>%
+  mutate(dysbiosis_90 = factor(dysbiosis_90)) %>%
+  mutate(dysbiosis_90 = fct_rev(dysbiosis_90)) %>%
+  select(-study_group.y)
+
+s <- s %>% 
+  left_join(dysbiosis_score, by="SampleID")
+```
+
+```{r}
+## calculate the most abundant taxon
+props_ranks <- apply(summed_props, 2, function(x) rank(-x, ties.method="first"))
+genus_ranks <- apply(summed_props_g, 2, function(x) rank(-x, ties.method="first"))
+
+s_topTaxa <- s %>%
+  select(SampleID) %>%
+  merge(unlist(apply(props_ranks, 2, function(x) names(which(x==1)))), by.x="SampleID", by.y="row.names") %>%
+  rename(topTaxa = y) %>%
+  mutate(topTaxa_coded = fct_lump(topTaxa, prop=0.015)) %>%
+  merge(unlist(apply(props_ranks, 2, function(x) names(which(x==2)))), by.x="SampleID", by.y="row.names") %>%
+  rename(secondTaxa = y) %>%
+  mutate(secondTaxa_coded = fct_lump(secondTaxa, prop=0.015)) %>%
+  merge(unlist(apply(genus_ranks, 2, function(x) names(which(x==1)))), by.x="SampleID", by.y="row.names") %>%
+  rename(topGenus = y) %>%
+  mutate(topGenus_coded = fct_lump(topGenus, prop=0.01)) %>%
+  merge(unlist(apply(genus_ranks, 2, function(x) names(which(x==2)))), by.x="SampleID", by.y="row.names") %>%
+  rename(secondGenus = y) %>%
+  mutate(secondGenus_coded = fct_lump(secondGenus, prop=0.01)) %>%
+  
+  mutate(topAbundance = apply(., 1, function(x) summed_props[x["topTaxa"], x["SampleID"]])) %>%
+  mutate(secondTop_props = apply(., 1, function(x) summed_props[x["secondTaxa"], x["SampleID"]])) %>%
+  
+  mutate(topAbundance_Genus = apply(., 1, function(x) summed_props_g[x["topGenus"], x["SampleID"]])) %>%
+  mutate(secondTop_props_Genus = apply(., 1, function(x) summed_props_g[x["secondGenus"], x["SampleID"]])) 
+
+s <- left_join(s, s_topTaxa, by="SampleID")
+
+rm(props_ranks, genus_ranks, s_topTaxa)
+```
+
+
+
+```{r}
+## read in the antibody data
+antibody1 <- read_delim(file.path(data_dir, "Utz_antibody_data", "PERCH_antibody_panel1.tsv")) %>%
+  pivot_longer(cols=-all_of(c("Sample", "age_group", "Group")), names_to = "antibody") %>%
+  mutate(panel = "panel1")
+antibody2 <- read_delim(file.path(data_dir, "Utz_antibody_data", "PERCH_antibody_panel2.tsv")) %>%
+  rename(age_group = "Age Range", Sample="Location") %>%
+  pivot_longer(cols=-all_of(c("Sample", "age_group", "Group")), names_to = "antibody") %>%
+  mutate(panel = "panel2")
+antibody3 <- read_delim(file.path(data_dir, "Utz_antibody_data", "PERCHTotal_AutoantigenPanel.tsv")) %>%
+  rename(age_group = "Age Range") %>%
+  left_join(unique(select(antibody2, Sample, age_group, Group)), by=c("Sample", "age_group")) %>%
+  pivot_longer(cols=-all_of(c("Sample", "age_group", "Group")), names_to = "antibody") %>%
+  mutate(panel = "auto-antigen")
+
+## read in antibody categories
+antibody_cats <- read_delim("perch_antibody_groups.tsv")
+
+antibody <- bind_rows(antibody1, antibody2, antibody3) %>%
+  separate(Sample, into=c("subject_id", "extra"), remove = F) %>%
+  mutate(subject_id = paste0("p_", tolower(subject_id))) %>%
+  rename(study_group = Group) %>%
+  mutate(study_group = factor(study_group)) %>%
+  mutate(study_group = fct_recode(study_group, 
+                                  `Control without RTI`="without RTI",
+                                  `Control with RTI`="with RTI",
+                                  `Severe case`="Severe",
+                                  `Very severe case`="Very Severe")) %>%
+  left_join(antibody_cats, by="antibody") %>%
+  mutate(antibody_category = ifelse(is.na(antibody_category), "auto-antigen", antibody_category)) %>%
+  
+  # take these out based on our discussion with PJ's lab.
+  filter(!antibody %in% c("RSV", "OC43 Beta Coronavirus", "229E Alpha Coronavirus", "HKU1 Beta Coronavirus", "SARS-CoV-2 Spike RBD", "SARS2 S1", "SARS2 Spike S2 ECD", "SARS2 Nucleocapsid", "MERS RBD", "SARS1 RBD", "Rhinovirus")) 
+
+rm(antibody1, antibody2)
+```
+
+
+
+
+
+
+```{r eval=F}
+## we need to have groups for all the antibodies
+antibody %>%
+  select(antibody) %>%
+  unique() %>%
+  write.table("perch_antibody.tsv", row.names=F, quote=F, sep='\t')
+```
+
+
+```{r eval=F}
+s %>%
+  write.table("20250926_perch_metadata_with_updates.txt", sep='\t', row.names=F, quote=F)
+```
+
+
+```{r eval=F}
+## write out filtered files for Karen
+readxl::read_excel(file.path("Data", "Mali_PERCH_Metadata.xlsx"), sheet="PERCH-1_Sample_subsettedData") %>%
+  filter(Participant_ID %in% unique(filter(filter(s, Keep), !is.na(ParticipantID))$ParticipantID)) %>%
+  write.csv("Mali_PERCH_Metadata_filtered.csv")
+
+readxl::read_excel(file.path("Data", "PERCH_Mali_Participants.xlsx"), sheet="PERCH-Mali_Participants_metadat") %>%
+  filter(Participant_ID %in% unique(filter(filter(s, Keep), !is.na(ParticipantID))$ParticipantID)) %>%
+  write.csv("PERCH_Mali_Participants_filtered.csv")
+
+readxl::read_excel(file.path("Data", "Mali_PERCH_Metadata.xlsx"), sheet="PERCH-1_Participant repeated me") %>%
+  filter(Participant_ID %in% unique(filter(filter(s, Keep), !is.na(ParticipantID))$ParticipantID)) %>%
+  write.csv("Mali_PERCH_Metadata_filtered_rep_measures_filtered.csv")
+```
+
