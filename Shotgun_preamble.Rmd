@@ -483,3 +483,68 @@ readxl::read_excel(file.path("Data", "Mali_PERCH_Metadata.xlsx"), sheet="PERCH-1
   write.csv("Mali_PERCH_Metadata_filtered_rep_measures_filtered.csv")
 ```
 
+```{r eval=F}
+# write table for Karen
+s %>% 
+  filter(Keep) %>% 
+  select(subject_id, study_group, age_group, age_months, bf_duration, bf_duration_exclusive, bf_current, vaccine_Measles, vaccine_PCV, vaccine_Hflu, vaccine_DPT) %>% 
+  unique() %>% 
+  write.table(file="perch_for_supp_figure.txt", sep='\t', row.names=F, quote=F)
+
+
+s %>% 
+  filter(Keep) %>%
+  select(subject_id, study_group, age_group, sample_type, current_abx) %>%
+  write.table(file="perch_for_supp_figure_abx.txt", sep='\t', row.names=F, quote=F)
+
+s %>%
+  filter(sample_type %in% c("Induced Sputum", "NPOP VTM")) %>%
+  group_by(sample_type, Keep) %>%
+  count() %>%
+  ungroup() %>%
+  group_by(sample_type) %>%
+  mutate(sum(n)) %>%
+  ungroup()
+
+s %>% filter(sample_type %in% c("Induced Sputum", "NPOP VTM")) %>% pull(subject_id) %>% unique() %>% length()
+
+s %>% filter(sample_type %in% c("Induced Sputum", "NPOP VTM")) %>% filter(Keep) %>% pull(subject_id) %>% unique() %>% length()
+```
+
+
+```{r eval=F}
+# sra submission files
+s %>%
+  filter(Keep) %>% 
+  filter(!isControl) %>%
+  select(SampleID, sample_type, ParticipantID, age_group, age_months, study_group, death, current_abx, bf_current, malnutrition_baseline, vaccine_Measles, vaccine_PCV, vaccine_DPT, vaccine_Hflu) %>%
+  mutate(sample_title = NA) %>%
+  mutate(bioproject_accession = NA) %>%
+  mutate(organism = "human gut metagenome") %>%
+  mutate(collection_date = 2019) %>%
+  mutate(env_broad_scale = "dense settlement biome") %>%
+  mutate(env_local_scale = "animal-associated environment") %>%
+  mutate(env_medium = sample_type) %>%
+  mutate(geo_loc_name = "Mali") %>%
+  mutate(host = "Homo sapiens") %>%
+  mutate(lat_lon="12.651 N 7.997 W") %>%
+  write.table("../perch_sra_submission/perch_samples_for_SRA_mims.txt", row.names = F, quote=F, sep='\t')
+
+
+s %>%
+  filter(Keep) %>% 
+  filter(!isControl) %>%
+  select(SampleID) %>%
+  mutate(R1 = paste0(SampleID, "_1.fastq.gz")) %>%
+  mutate(R2 = paste0(SampleID, "_2.fastq.gz")) %>%
+  write.table("../perch_sra_submission/perch_samples_for_SRA_mims_metadata.txt", row.names = F, quote=F, sep='\t')
+
+
+s %>%
+  filter(Keep) %>% 
+  filter(!isControl) %>%
+  select(SampleID) %>%
+  write.table("../perch_sra_submission/perch_sampleIDs_for_SRA.txt", row.names = F, quote=F, sep='\t')
+
+```
+

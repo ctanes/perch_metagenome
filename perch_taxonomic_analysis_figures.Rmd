@@ -3992,6 +3992,32 @@ antibody_toTest <- antibody %>%
 ```
 
 
+
+```{r}
+antibody_bugs <- antibody_toTest %>%
+  filter(panel %in% c("panel1", "panel2")) %>%
+  filter(!(antibody_category %in% "global" & panel %in% "panel2")) %>%
+  droplevels()
+
+s_antibody <- antibody_bugs %>%
+  select(subject_id, age_group, study_group_death, isDeath) %>%
+  unique()
+```
+
+```{r}
+antibody_auto <- antibody_toTest %>%
+  filter(panel %in% c("auto-antigen")) %>%
+  droplevels()
+
+s_auto <- antibody_auto %>%
+  select(subject_id, age_group, study_group_death, isDeath) %>%
+  unique()
+```
+
+
+
+
+
 ```{r fig.width=20, fig.height=20}
 antibody_toTest %>%
   ggplot(aes(x=value)) +
@@ -4004,9 +4030,7 @@ antibody_toTest %>%
 ## Fig 4A: Antibody data overview
 
 ```{r fig.height=10}
-antibody_toTest %>%
-  filter(panel %in% c("panel1", "panel2")) %>%
-  filter(!(antibody_category %in% "global" & panel %in% c("panel2", "auto-antigen"))) %>% #keep the panel1 global antibodies
+antibody_bugs %>%
   #filter(age_group != "0-5 months") %>%
   mutate(antibody_category = factor(antibody_category)) %>%
   mutate(antibody_category = fct_relevel(antibody_category, "RSV", after=0)) %>%
@@ -4030,9 +4054,7 @@ ggsave("perch_Fig4A_antibody_overview.pdf", height=8, width=8.6, useDingbats=F)
 ```
 
 ```{r fig.height=15}
-antibody_toTest %>%
-  filter(panel %in% c("auto-antigen")) %>%
-  filter(!antibody_category %in% "global") %>%
+antibody_bugs %>%
   #filter(!(antibody_category %in% "global" & panel %in% c("panel2", "auto-antigen"))) %>% #keep the panel1 global antibodies
   #filter(age_group != "0-5 months") %>%
   
@@ -4063,9 +4085,7 @@ ggsave("perch_autoantigen_overview.pdf", height=8, width=25, useDingbats=F)
 
 
 ```{r fig.height=10}
-antibody_toTest %>%
-  filter(panel %in% c("panel1", "panel2")) %>%
-  filter(!(antibody_category %in% "global" & panel %in% "panel2")) %>% #keep the panel1 global antibodies
+antibody_bugs %>% #keep the panel1 global antibodies
   #filter(age_group != "0-5 months") %>%
   mutate(antibody_category = factor(antibody_category)) %>%
   mutate(antibody_category = fct_relevel(antibody_category, "RSV", after=0)) %>%
@@ -4108,32 +4128,24 @@ ggsave("perch_Fig4A_antibody_overview2.pdf", height=8, width=6, useDingbats=F)
 
 
 ```{r fig.height=15}
-antibody_toTest %>%
-  filter(panel %in% "auto-antigen") %>%
+antibody_auto %>%
   filter(!antibody_category %in% "global") %>%
   filter(!antibody %in% "BPI") %>%
-  filter(!(antibody_category %in% "global" & panel %in% "panel2")) %>% #keep the panel1 global antibodies
-  #filter(age_group != "0-5 months") %>%
-  mutate(antibody_category = factor(antibody_category)) %>%
-  mutate(antibody_category = fct_relevel(antibody_category, "global", after=0)) %>%
-  #mutate(study_group_death = fct_relabel(study_group_death, function(x) gsub(" ", "\n", x))) %>%
   
   group_by(antibody) %>%
   mutate(value = as.numeric(scale(value))) %>%
   ungroup() %>%
   
   group_by(antibody, study_group_death, age_group) %>%
-  mutate(value = mean(value, na.rm = T)) %>%
+  summarize(value = mean(value, na.rm = T)) %>%
   ungroup() %>%
   
-  mutate(antibody = sub("pertusis", "pertussis", antibody)) %>%
-  mutate(antibody_category = factor(antibody_category)) %>%
-  mutate(antibody_category = fct_relevel(antibody_category, "Bacteria", after=Inf)) %>%
+  #mutate(antibody_category = factor(antibody_category)) %>%
   
   ggplot(aes(x=study_group_death, y=antibody, fill=value)) +
     geom_tile() +
     #scale_x_continuous(trans="log10") +
-    facet_grid(antibody_category~age_group, scales="free", space="free") +
+    facet_grid(.~age_group, scales="free", space="free") +
     scale_fill_viridis(option="magma") +
     theme_clean() +
     theme(
@@ -4148,6 +4160,152 @@ antibody_toTest %>%
     )
 ggsave("perch_autoantigen_overview2.pdf", height=8, width=5.8, useDingbats=F)
 ```
+
+
+
+
+```{r fig.height=15}
+heat_order <- antibody_auto %>% 
+  filter(!antibody_category %in% "global") %>%
+  filter(!antibody %in% "BPI") %>%
+  filter(study_group_death %in% "Death") %>%
+  filter(age_group %in% "24-59 months") %>%
+  group_by(antibody) %>%
+  summarize(perc_present = mean(value_orj > 0)) %>%
+  ungroup() %>%
+  arrange(-perc_present)
+
+antibody_auto %>%
+  filter(!antibody_category %in% "global") %>%
+  filter(!antibody %in% "BPI") %>%
+  
+  group_by(antibody) %>%
+  mutate(value = as.numeric(scale(value))) %>%
+  ungroup() %>%
+  
+  group_by(antibody, study_group_death, age_group) %>%
+  summarize(value = mean(value, na.rm = T)) %>%
+  ungroup() %>%
+  
+  left_join(heat_order, by="antibody") %>%
+  mutate(antibody = reorder(antibody, -perc_present)) %>%
+  #arrange(factor(antibody, levels = heat_order$antibody)) %>%
+  
+  ggplot(aes(x=study_group_death, y=antibody, fill=value)) +
+    geom_tile() +
+    #scale_x_continuous(trans="log10") +
+    facet_grid(.~age_group, scales="free", space="free") +
+    scale_fill_viridis(option="magma") +
+    theme_clean() +
+    theme(
+      #axis.text.x = element_blank(),
+      #axis.ticks.x = element_blank(),
+      axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1),
+      legend.position = "bottom",
+      legend.key.width = unit(0.8, "cm")
+    ) +
+    labs(
+      x="", y="", fill="Mean Z-score"
+    )
+ggsave("perch_autoantigen_overview3.pdf", height=8, width=5.8, useDingbats=F)
+```
+
+
+```{r fig.height=15}
+
+heat_data <- antibody_auto %>%
+  filter(!antibody_category %in% "global") %>%
+  filter(!antibody %in% "BPI") %>%
+  
+  group_by(antibody) %>%
+  mutate(value = as.numeric(scale(value))) %>%
+  ungroup() %>%
+  
+  group_by(antibody, study_group_death, age_group) %>%
+  summarize(value = mean(value, na.rm = T)) %>%
+  ungroup() %>%
+  
+  mutate(x = paste(study_group_death, age_group)) %>%
+  
+  pivot_to_numeric_matrix(antibody, x, value)
+
+
+heat_data %>%
+  pheat() %>%
+  pheat_color(viridis(100, option="magma")) %>%
+  pheat_cluster_rows() %>%
+  #pheat_annotate_cols(s_auto) #%>%
+  pheat_display_cols(gaps = c(4,8,12,16)) %>%
+  pheat_save("perch_autoantigen_overview_clustered.pdf", height=15, width=5.8)
+```
+
+```{r fig.height=15}
+
+heat_data <- antibody_auto %>%
+  filter(!antibody_category %in% "global") %>%
+  filter(!antibody %in% "BPI") %>%
+  
+  group_by(antibody) %>%
+  mutate(value = as.numeric(scale(value))) %>%
+  ungroup() %>%
+  
+  group_by(antibody, age_group, study_group_death) %>%
+  summarize(value = mean(value, na.rm = T)) %>%
+  ungroup() %>%
+  
+  mutate(x = paste(age_group, study_group_death)) %>%
+  
+  pivot_to_numeric_matrix(antibody, x, value)
+
+
+heat_data %>%
+  pheat() %>%
+  pheat_color(viridis(100, option="magma")) %>%
+  pheat_cluster_rows() %>%
+  #pheat_annotate_cols(s_auto) #%>%
+  pheat_display_cols(gaps = c(4,8,12,16)) %>%
+  pheat_save("perch_autoantigen_overview_clustered2.pdf", height=15, width=5.8)
+  
+
+```
+
+
+
+
+```{r fig.height=15}
+
+heat_data <- antibody_auto %>%
+  filter(!antibody_category %in% "global") %>%
+  filter(!antibody %in% "BPI") %>%
+  
+  #group_by(antibody) %>%
+  #mutate(value = as.numeric(scale(value))) %>%
+  #ungroup() %>%
+  
+  
+  group_by(antibody, age_group, study_group_death) %>%
+  summarize(value = mean(value, na.rm = T)) %>%
+  ungroup() %>%
+  
+  mutate(value = log10(value)) %>%
+  
+  mutate(x = paste(age_group, study_group_death)) %>%
+  
+  pivot_to_numeric_matrix(antibody, x, value)
+
+
+heat_data %>%
+  pheat() %>%
+  pheat_color(viridis(100, option="magma")) %>%
+  pheat_cluster_rows() %>%
+  #pheat_annotate_cols(s_auto) #%>%
+  pheat_display_cols(gaps = c(4,8,12,16)) %>%
+  pheat_save("perch_autoantigen_overview_log10_clustered2.pdf", height=15, width=5.8)
+  
+```
+
+
+
 
 
 ```{r}
@@ -4247,16 +4405,6 @@ PCA plot of antibody profiles
 
 ### Against bugs
 
-```{r}
-antibody_bugs <- antibody_toTest %>%
-  filter(panel %in% c("panel1", "panel2")) %>%
-  filter(!(antibody_category %in% "global" & panel %in% "panel2")) %>%
-  droplevels()
-
-s_antibody <- antibody_bugs %>%
-  select(subject_id, age_group, study_group_death, isDeath) %>%
-  unique()
-```
 
 
 PCA plot after scaling the values
@@ -4375,16 +4523,6 @@ summaries_df %>%
 
 ### Auto-antibodies
 
-```{r}
-antibody_auto <- antibody_toTest %>%
-  filter(panel %in% c("auto-antigen")) %>%
-  droplevels()
-
-s_antibody <- antibody_auto %>%
-  select(subject_id, age_group, study_group_death, isDeath) %>%
-  unique()
-```
-
 
 
 ```{r}
@@ -4399,13 +4537,13 @@ pc_pct <- round((pca$sdev^2) / sum(pca$sdev^2) * 100)
 
 
 centroids <- data_frame(PC1=pca$x[,1], PC2=pca$x[,2], subject_id = rownames(pca$x)) %>%
-  left_join(s_antibody, by="subject_id") %>%
+  left_join(s_auto, by="subject_id") %>%
   group_by(age_group, study_group_death, isDeath) %>%
   summarize(PC1=mean(PC1), PC2=mean(PC2)) %>%
   ungroup()
   
 
-s_antibody %>%
+s_auto %>%
   merge(pca$x[,1:2], by.x="subject_id", by.y="row.names") %>%
   ggplot(aes(x=PC1, y=PC2, color=study_group_death)) +
     geom_point(alpha=0.5) +
@@ -4437,13 +4575,13 @@ pc_pct <- round((pca$sdev^2) / sum(pca$sdev^2) * 100)
 
 
 centroids <- data_frame(PC1=pca$x[,1], PC2=pca$x[,2], subject_id = rownames(pca$x)) %>%
-  left_join(s_antibody, by="subject_id") %>%
+  left_join(s_auto, by="subject_id") %>%
   group_by(age_group, study_group_death, isDeath) %>%
   summarize(PC1=mean(PC1), PC2=mean(PC2)) %>%
   ungroup()
   
 
-s_antibody %>%
+s_auto %>%
   merge(pca$x[,1:2], by.x="subject_id", by.y="row.names") %>%
   ggplot(aes(x=PC1, y=PC2, color=study_group_death)) +
     geom_point(alpha=0.5) +
@@ -4472,7 +4610,7 @@ For each age group: distmat ~ study_group_death
 ```{r eval=T}
 euc_auto <- vegdist(t(antibody_matrix), method="euclidean", binary=F)
 
-summaries_df <- s_antibody %>%
+summaries_df <- s_auto %>%
   group_by(age_group) %>%
   do(adonispost(
     ., distmat = euc_auto, formula = distmat ~ study_group_death,
@@ -5276,6 +5414,7 @@ antibody_auto %>%
     scale_fill_manual(values=ann_colors$study_group_death) +
     scale_alpha_manual(values=c(0.7, 1)) +
     scale_pattern_manual(values=c("stripe", "none")) +
+    scale_y_continuous(limits=c(0, 45)) +
     facet_wrap(~antibody, ncol=4) +
     theme_clean() +
     theme(
@@ -5315,6 +5454,7 @@ antibody_auto %>%
     scale_fill_manual(values=ann_colors$study_group_death) +
     scale_alpha_manual(values=c(0.7, 1)) +
     scale_pattern_manual(values=c("stripe", "none")) +
+    scale_y_continuous(limits=c(0, 45)) +
     facet_wrap(~antibody, ncol=7) +
     theme_clean() +
     theme(
