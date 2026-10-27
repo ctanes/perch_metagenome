@@ -133,7 +133,7 @@ perm <- 99 ## The number of permutations to do for PERMANOVA. You can start with
 richness_subsample_size <- 1000
 
 ### mapping file path
-mapping_file_fp <- file.path(data_dir, "20260313_Mali_PERCH_mapping_file.tsv")
+mapping_file_fp <- file.path(data_dir, "20260904_Mali_PERCH_mapping_file.tsv")
 
 ### preprocess summary results filepath
 preprocess_fp <- file.path(data_dir, "preprocess_summary.tsv")
@@ -411,7 +411,7 @@ rm(props_ranks, genus_ranks, s_topTaxa)
 
 
 
-```{r}
+```{r eval=F}
 ## read in the antibody data
 antibody1 <- read_delim(file.path(data_dir, "Utz_antibody_data", "PERCH_antibody_panel1.tsv")) %>%
   pivot_longer(cols=-all_of(c("Sample", "age_group", "Group")), names_to = "antibody") %>%
@@ -445,11 +445,16 @@ antibody <- bind_rows(antibody1, antibody2, antibody3) %>%
   # take these out based on our discussion with PJ's lab.
   filter(!antibody %in% c("RSV", "OC43 Beta Coronavirus", "229E Alpha Coronavirus", "HKU1 Beta Coronavirus", "SARS-CoV-2 Spike RBD", "SARS2 S1", "SARS2 Spike S2 ECD", "SARS2 Nucleocapsid", "MERS RBD", "SARS1 RBD", "Rhinovirus")) 
 
-rm(antibody1, antibody2)
+rm(antibody1, antibody2, antibody3)
+
+write.table(antibody, file="perch_antibody.tsv", sep='\t', quote=F, row.names=F)
 ```
 
 
 
+```{r}
+antibody <- read_delim("perch_antibody.tsv")
+```
 
 
 
@@ -469,7 +474,7 @@ s %>%
 
 
 ```{r eval=F}
-## write out filtered files for Karen
+## write out filtered files
 readxl::read_excel(file.path("Data", "Mali_PERCH_Metadata.xlsx"), sheet="PERCH-1_Sample_subsettedData") %>%
   filter(Participant_ID %in% unique(filter(filter(s, Keep), !is.na(ParticipantID))$ParticipantID)) %>%
   write.csv("Mali_PERCH_Metadata_filtered.csv")
